@@ -30,7 +30,7 @@ class Config:
 
     # Telegram Bot sozlamalari (@BotFather dan olingan token va Admin ID)
     BOT_TOKEN = os.getenv("BOT_TOKEN", "8655952088:AAGZq3Z5u-5r9onDaib-KO2K089J4jTHxJc")
-    ADMIN_ID = os.getenv("ADMIN_ID", "7552962971")
+    ADMIN_ID = os.getenv("ADMIN_ID", "7552962971 , 8429833963")
     BOT_USERNAME = os.getenv("BOT_USERNAME", "ANTAARAB_SMM_ORG_BOT")
 
 
