@@ -22,6 +22,11 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
+
+# ============================================================================
+# 1-BO'LIM: CONFIG (SOZLAMALAR)
+# ============================================================================
 import os
 
 
@@ -51,6 +56,14 @@ os.makedirs(config.SET_DIR, exist_ok=True)
 API_KEY = config.BOT_TOKEN
 ADMIN = str(config.ADMIN_ID)
 
+# ============================================================================
+# 2-BO'LIM: DATABASE VA RAM KESH (SQLite3 WAL + Tezkor Xotira)
+# ============================================================================
+
+"""
+2-MODUL: database.py — Tezkor SQLite3 (WAL rejimida) va RAM keshli fayl/baza tizimi.
+Barcha foydalanuvchi qadamlari (user/*.step) va buyurtmalar operativ xotirada (RAM) hamda SQLite bazada tezkor saqlanadi (0.0001s).
+"""
 import base64
 import hashlib
 import os
@@ -60,6 +73,8 @@ import sqlite3
 import threading
 import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
+
 
 class _PersistentConnWrapper:
     """conn.close() chaqirilganda ulanishni yopmasdan saqlab qoluvchi o'ram."""
@@ -74,6 +89,7 @@ class _PersistentConnWrapper:
 
     def close(self):
         pass
+
 
 _DB_LOCK = threading.RLock()
 _PERSISTENT_SQLITE: Optional[_PersistentConnWrapper] = None
@@ -219,6 +235,38 @@ class DatabaseModule:
             "CREATE INDEX IF NOT EXISTS `idx_myorder_uid` ON `myorder` (`user_id`)",
             "CREATE INDEX IF NOT EXISTS `idx_services_cat` ON `services` (`category_id`)",
             "CREATE INDEX IF NOT EXISTS `idx_saved_orders_uid` ON `saved_orders` (`user_id`)",
+            """CREATE TABLE IF NOT EXISTS `earn_channels` (
+                `id` INTEGER PRIMARY KEY AUTOINCREMENT,
+                `channel_username` TEXT NOT NULL DEFAULT '',
+                `title` TEXT NOT NULL DEFAULT '',
+                `reward` TEXT NOT NULL DEFAULT '100',
+                `status` TEXT NOT NULL DEFAULT 'on'
+            )""",
+            """CREATE TABLE IF NOT EXISTS `earn_tasks` (
+                `id` INTEGER PRIMARY KEY AUTOINCREMENT,
+                `title` TEXT NOT NULL DEFAULT '',
+                `description` TEXT NOT NULL DEFAULT '',
+                `url` TEXT NOT NULL DEFAULT '',
+                `reward` TEXT NOT NULL DEFAULT '150',
+                `verify_type` TEXT NOT NULL DEFAULT 'auto',
+                `status` TEXT NOT NULL DEFAULT 'on'
+            )""",
+            """CREATE TABLE IF NOT EXISTS `promocodes` (
+                `id` INTEGER PRIMARY KEY AUTOINCREMENT,
+                `code` TEXT NOT NULL DEFAULT '',
+                `reward` TEXT NOT NULL DEFAULT '200',
+                `max_uses` INTEGER NOT NULL DEFAULT 10,
+                `used_count` INTEGER NOT NULL DEFAULT 0,
+                `status` TEXT NOT NULL DEFAULT 'on'
+            )""",
+            """CREATE TABLE IF NOT EXISTS `earn_claims` (
+                `id` INTEGER PRIMARY KEY AUTOINCREMENT,
+                `user_id` TEXT NOT NULL DEFAULT '',
+                `claim_type` TEXT NOT NULL DEFAULT '',
+                `item_id` TEXT NOT NULL DEFAULT '',
+                `claimed_at` TEXT NOT NULL DEFAULT ''
+            )""",
+            "CREATE INDEX IF NOT EXISTS `idx_earn_claims_user` ON `earn_claims` (`user_id`, `claim_type`, `item_id`)",
         ]
         for stmt in schema_statements:
             cur.execute(stmt)
@@ -241,7 +289,7 @@ class DatabaseModule:
                 )"""
             )
         else:
-
+            # Mavjud bazadagi eski xato shablonlarni avtomatik to'g'irlash (Ijyonda -> Jarayonda, {users} qatorini olib tashlash)
             cur.execute("SELECT `id`, `orders`, `kabinet` FROM `settings` LIMIT 1")
             srow = cur.fetchone()
             if srow:
@@ -345,6 +393,11 @@ class DatabaseModule:
 database = DatabaseModule()
 database.init_db()
 
+
+# ============================================================================
+# Yordamchi funksiyalar va RAM keshli fayl tizimi
+# ============================================================================
+
 def enc(action: str, value: Optional[str]) -> str:
     """Base64 kodlash va dekodlash (PHP enc() analogi)."""
     if not value:
@@ -360,12 +413,14 @@ def enc(action: str, value: Optional[str]) -> str:
             return ""
     return str(value)
 
+
 def number_fmt(val: Union[int, float, str]) -> str:
     """Sonlarni 1 000 ko'rinishida formatlash."""
     try:
         return f"{int(float(val)):,}".replace(",", " ")
     except Exception:
         return str(val)
+
 
 def fmt_money(val: Union[int, float, str]) -> str:
     """Pul miqdorini 0.23800000000000002 kabi xatolarsiz toza ko'rinishda formatlaydi."""
@@ -380,6 +435,7 @@ def fmt_money(val: Union[int, float, str]) -> str:
     if r2 > 0:
         return f"{r2:.2f}".rstrip("0").rstrip(".")
     return f"{num:.4f}".rstrip("0").rstrip(".")
+
 
 def format_kabinet_msg(kabinet_tpl: str, rew: Dict[str, Any], fallback_id: str = "") -> str:
     """Balans xabaridan {users} qatorini olib tashlaydi va summalarni toza formatlaydi."""
@@ -403,6 +459,7 @@ def format_kabinet_msg(kabinet_tpl: str, rew: Dict[str, Any], fallback_id: str =
         .replace("{balance}", bal_str)
         .replace("{id}", uid_str)
     )
+
 
 def format_order_confirmed_msg(
     order_tpl: str,
@@ -433,17 +490,21 @@ def format_order_confirmed_msg(
         .replace("{price}", price_clean)
     )
 
+
 def _resolve_path(rel_path: str) -> str:
     clean = rel_path.lstrip("./")
     return os.path.join(config.BASE_DIR, clean)
+
 
 _FILE_CACHE: Dict[str, str] = {}
 _FILE_LOCK = threading.RLock()
 _HTTP_GET_FALLBACK: Optional[Callable[[str], str]] = None
 
+
 def set_http_get_handler(fn: Callable[[str], str]) -> None:
     global _HTTP_GET_FALLBACK
     _HTTP_GET_FALLBACK = fn
+
 
 def get_file(rel_path: str) -> str:
     """file_get_contents analogi (RAM kesh bilan 0.0001 soniyada ishlaydi)."""
@@ -464,6 +525,7 @@ def get_file(rel_path: str) -> str:
         except Exception:
             return ""
 
+
 def put_file(rel_path: str, content: Union[str, int, float], append: bool = False) -> None:
     """file_put_contents analogi (RAM keshni darhol yangilaydi)."""
     full = _resolve_path(rel_path)
@@ -481,6 +543,7 @@ def put_file(rel_path: str, content: Union[str, int, float], append: bool = Fals
         with open(full, mode, encoding="utf-8") as f:
             f.write(str_val)
 
+
 def unlink_file(rel_path: str) -> None:
     """unlink analogi."""
     full = _resolve_path(rel_path)
@@ -492,6 +555,7 @@ def unlink_file(rel_path: str) -> None:
         except Exception:
             pass
 
+
 def rmdir_pro(rel_path: str) -> None:
     """rmdirPro analogi."""
     full = _resolve_path(rel_path)
@@ -502,10 +566,12 @@ def rmdir_pro(rel_path: str) -> None:
         if os.path.exists(full):
             shutil.rmtree(full, ignore_errors=True)
 
+
 def generate_ref_code() -> str:
     """7 xonali tasodifiy referal kod yaratadi."""
     chars = "ABCDEFGHIJKLMNOPRSTUVXYZ1234567890"
     return "".join(random.choice(chars) for _ in range(7))
+
 
 def adduser(cid: Union[str, int]) -> None:
     """Yangi foydalanuvchini users jadvaliga qo'shadi."""
@@ -524,6 +590,7 @@ def adduser(cid: Union[str, int]) -> None:
             (new_uid, str(cid), key, ref),
         )
 
+
 def strip_provider_domain(api_url: str) -> str:
     """Provayder URL manzilidan domen yoki @bot nomini ajratib oladi."""
     if not api_url:
@@ -532,6 +599,13 @@ def strip_provider_domain(api_url: str) -> str:
         api_url = api_url.replace(token, "")
     return api_url.strip("/")
 
+# ============================================================================
+# 3-BO'LIM: NETWORK (Keep-Alive SSL Havzasi va HTTP Tarmoq Tizimi)
+# ============================================================================
+
+"""
+3-MODUL: network.py — Telegram Bot API Keep-Alive havzasi va tezkor HTTP so'rovlar tizimi.
+"""
 import glob
 import http.client
 import json
@@ -546,9 +620,12 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+
+# Windows da IPv6 (AAAA) kutib qolishini oldini olish va DNS ni RAM da keshlab turish
 _orig_getaddrinfo = socket.getaddrinfo
 _dns_cache: Dict[Tuple[Any, Any], Any] = {}
 _dns_lock = threading.Lock()
+
 
 def _ipv4_first_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
     cache_key = (host, port, type, proto)
@@ -567,8 +644,10 @@ def _ipv4_first_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
         _dns_cache[cache_key] = res
     return res
 
+
 socket.getaddrinfo = _ipv4_first_getaddrinfo
 
+# Global Keep-Alive HTTPS ulanishlar havzasi
 _SSL_CTX = ssl.create_default_context()
 _UNVERIFIED_SSL_CTX = ssl.create_default_context()
 _UNVERIFIED_SSL_CTX.check_hostname = False
@@ -586,6 +665,7 @@ _BROWSER_HEADERS = {
     "Accept-Language": "uz-UZ,uz;q=0.9,ru;q=0.8,en;q=0.7",
 }
 
+
 def _create_fast_https_conn(timeout_sec: float = 3.5) -> http.client.HTTPSConnection:
     conn = http.client.HTTPSConnection("api.telegram.org", 443, timeout=timeout_sec, context=_SSL_CTX)
     conn.connect()
@@ -596,6 +676,7 @@ def _create_fast_https_conn(timeout_sec: float = 3.5) -> http.client.HTTPSConnec
         except Exception:
             pass
     return conn
+
 
 def _is_conn_alive(conn: Optional[http.client.HTTPSConnection], created_ts: float = 0.0) -> bool:
     if conn is None or conn.sock is None:
@@ -609,6 +690,7 @@ def _is_conn_alive(conn: Optional[http.client.HTTPSConnection], created_ts: floa
         return True
     except Exception:
         return False
+
 
 def _prewarm_connections(target_count: int = 4) -> None:
     valid_items: List[Tuple[http.client.HTTPSConnection, float]] = []
@@ -638,6 +720,7 @@ def _prewarm_connections(target_count: int = 4) -> None:
             except Exception:
                 pass
 
+
 def _conn_warmer_worker() -> None:
     while True:
         time.sleep(15)
@@ -645,6 +728,7 @@ def _conn_warmer_worker() -> None:
             _prewarm_connections(4)
         except Exception:
             pass
+
 
 def _borrow_alive_api_conn() -> http.client.HTTPSConnection:
     while True:
@@ -658,6 +742,7 @@ def _borrow_alive_api_conn() -> http.client.HTTPSConnection:
                 pass
         except queue.Empty:
             return _create_fast_https_conn(3.5)
+
 
 def _send_telegram_http(method: str, body_bytes: bytes, headers: Dict[str, str], is_poll: bool) -> Dict[str, Any]:
     global _POLL_CONN
@@ -713,6 +798,7 @@ def _send_telegram_http(method: str, body_bytes: bytes, headers: Dict[str, str],
                 return {"ok": False, "description": str(exc)}
     return {"ok": False}
 
+
 def bot(method: str, datas: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Telegram Bot API ga tayyor Keep-Alive havza orqali bir zumda so'rov yuboradi."""
     if not API_KEY or API_KEY in ("TOKEN", "TOKEN_SHU_YERGA_YOZILADI"):
@@ -744,7 +830,9 @@ def bot(method: str, datas: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     }
     return _send_telegram_http(method, body_bytes, headers, is_poll=(method == "getUpdates"))
 
+
 def _bg_worker() -> None:
+    """deleteMessage va answerCallbackQuery so'rovlarini alohida soketda fonda bajaradi."""
     global _BG_CONN
     while True:
         try:
@@ -781,10 +869,12 @@ def _bg_worker() -> None:
         except Exception:
             pass
 
+
 def start_network_workers() -> None:
     threading.Thread(target=_bg_worker, daemon=True).start()
     _prewarm_connections(4)
     threading.Thread(target=_conn_warmer_worker, daemon=True).start()
+
 
 def http_get(url: str, extra_headers: Optional[Dict[str, str]] = None) -> str:
     """To'liq Chrome User-Agent bilan SSL tekshiruvisiz tezkor HTTP GET so'rovi."""
@@ -800,13 +890,17 @@ def http_get(url: str, extra_headers: Optional[Dict[str, str]] = None) -> str:
     except Exception:
         return ""
 
+
 set_http_get_handler(http_get)
+
 
 def api_query(url: str) -> str:
     content = http_get(url)
     return content if content else json.dumps({"balance": " ?"})
 
+
 _CACHED_BOT_USERNAME: Optional[str] = None
+
 
 def get_bot_username() -> str:
     global _CACHED_BOT_USERNAME
@@ -820,6 +914,7 @@ def get_bot_username() -> str:
         _CACHED_BOT_USERNAME = res["result"].get("username", config.BOT_USERNAME)
         return _CACHED_BOT_USERNAME
     return config.BOT_USERNAME
+
 
 def trans(text: str) -> str:
     if not text:
@@ -835,10 +930,12 @@ def trans(text: str) -> str:
     except Exception:
         return text
 
+
 def del_msg(chat_id: Union[str, int], message_id: Union[str, int]) -> Dict[str, Any]:
     if chat_id and message_id:
         _BG_QUEUE.put(("deleteMessage", {"chat_id": chat_id, "message_id": message_id}))
     return {"ok": True}
+
 
 def edit(
     chat_id: Union[str, int],
@@ -858,6 +955,7 @@ def edit(
         },
     )
 
+
 def sms(
     chat_id: Union[str, int],
     text: str,
@@ -874,7 +972,9 @@ def sms(
         },
     )
 
+
 BOT_CODE_PRICE = 70000.0
+
 
 def get_clean_bot_code_bytes() -> bytes:
     """Bo't yaratish bo'limidan sotib olinganda yuboriladigan tayyor bot kodi faylini (tokenlarsiz) tayyorlaydi."""
@@ -988,6 +1088,7 @@ top_raiting = referal_top
 
 _JOINCHAT_CACHE: Dict[str, float] = {}
 
+
 def joinchat(user_id: Union[str, int]) -> bool:
     uid_str = str(user_id)
     if uid_str == ADMIN:
@@ -1034,22 +1135,34 @@ def joinchat(user_id: Union[str, int]) -> bool:
     _JOINCHAT_CACHE[uid_str] = time.time() + 120.0
     return True
 
+# ============================================================================
+# 4-BO'LIM: KEYBOARDS (Barcha Menyular va Davlatlar Ro'yxati)
+# ============================================================================
+
+"""
+4-MODUL: keyboards.py — Barcha Reply va Inline klaviaturalar hamda SMS-Activate davlatlar ro'yxati.
+"""
 import json
 from typing import Any, Dict, List, Optional, Union
+
+
 
 def keyboard(inline_rows: List[List[Dict[str, Any]]]) -> str:
     """Inline klaviatura JSON satrini qaytaradi."""
     return json.dumps({"inline_keyboard": inline_rows}, ensure_ascii=False)
 
+
 def reply_keyboard(rows: List[List[Dict[str, Any]]], resize: bool = True) -> str:
     """Oddiy (Reply) klaviatura JSON satrini qaytaradi."""
     return json.dumps({"resize_keyboard": resize, "keyboard": rows}, ensure_ascii=False)
+
 
 def chunk_list(items: List[Any], size: int) -> List[List[Any]]:
     """PHP array_chunk analogi."""
     if size <= 0:
         return [items]
     return [items[i : i + size] for i in range(0, len(items), size)]
+
 
 ORT_KB = reply_keyboard([[{"text": "➡️ Orqaga"}]])
 ORDER_ORT_KB = reply_keyboard([[{"text": "❌ Bekor qilish"}, {"text": "➡️ Orqaga"}]])
@@ -1058,6 +1171,7 @@ AORT_KB = reply_keyboard([[{"text": "🗄️ Boshqaruv"}]])
 
 PANEL_KB = reply_keyboard([
     [{"text": "⚙️ Asosiy sozlamalar"}, {"text": "💳 Hamyonlar sozlamalari"}],
+    [{"text": "💵 Pul ishlash sozlamalari"}],
     [{"text": "🔔 Xabar yuborish"}, {"text": "📊 Statistika"}],
     [{"text": "👤 Foydalanuvchini boshqarish"}],
     [{"text": "🇺🇿 Valyuta kursi"}, {"text": "⏰ Cron sozlamasi"}],
@@ -1088,6 +1202,13 @@ MENU_ADMIN_KB = reply_keyboard([
     [{"text": "🗄️ Boshqaruv"}],
 ])
 
+# ============================================================================
+# 5-BO'LIM: SERVICES (Payme P2P, Cron, Avto- Yangilash va API v2 Server)
+# ============================================================================
+
+"""
+5-MODUL: services.py — Payme P2P, SMM Provayder narx sinxronizatsiyasi, Cron va API v2 serveri.
+"""
 import datetime
 import json
 import os
@@ -1097,6 +1218,8 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, Callable, Dict, List
+
+
 
 def handle_payme_request(params: Dict[str, str]) -> Dict[str, Any]:
     act = params.get("action", "")
@@ -1160,6 +1283,7 @@ def handle_payme_request(params: Dict[str, str]) -> Dict[str, Any]:
         return {"mess": pay_time}
 
     return {"error": "Unknown action"}
+
 
 def synchronize_services() -> Dict[str, Any]:
     updates: List[Dict[str, Any]] = []
@@ -1228,6 +1352,7 @@ def synchronize_services() -> Dict[str, Any]:
 
     return {"status": True, "cron": "Synchronize service: min, max, price", "updates": updates}
 
+
 def cron_send() -> Dict[str, Any]:
     """Ommaviy xabar yuborish cron vazifasi (?update=send)."""
     row = database.fetch_one("SELECT * FROM `send` LIMIT 1")
@@ -1280,6 +1405,7 @@ def cron_send() -> Dict[str, Any]:
         sms(admin_id, f"<b>✅ Yuborildi: {next_start}</b>")
 
     return {"status": True, "cron": "Sending message"}
+
 
 def cron_status() -> Dict[str, Any]:
     """Buyurtmalar holatini provayderdan tekshirish cron vazifasi (?update=status)."""
@@ -1338,6 +1464,7 @@ def cron_status() -> Dict[str, Any]:
 
     return {"status": True, "cron": "Orders status"}
 
+
 def _get_order_And_user_stats() -> Dict[str, int]:
     users = database.fetch_all("SELECT * FROM `users`")
     orders = database.fetch_all("SELECT * FROM `orders`")
@@ -1361,6 +1488,7 @@ def _get_order_And_user_stats() -> Dict[str, int]:
             stats[st] += 1
     return stats
 
+
 def _cron_worker() -> None:
     """Har 60 soniyada xabar yuborish, buyurtma holati va xizmat narxlarini yangilaydi."""
     while True:
@@ -1371,6 +1499,7 @@ def _cron_worker() -> None:
             synchronize_services()
         except Exception:
             pass
+
 
 def handle_api_v2(params: Dict[str, Any]) -> Any:
     """app/controller/api.php mantiqi (balance, add, services, orders, status)."""
@@ -1535,6 +1664,7 @@ def handle_api_v2(params: Dict[str, Any]) -> Any:
 
     return {"error": "Incorrect request"}
 
+
 def start_http_server_background(update_handler: Callable[[Dict[str, Any], str], None]) -> None:
     class BuiltinPanelHandler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: Any) -> None:
@@ -1595,7 +1725,13 @@ def start_http_server_background(update_handler: Callable[[Dict[str, Any], str],
     except Exception as exc:
         print(f"HTTP server ogohlantirishi: {exc}")
 
+# ============================================================================
+# 6-BO'LIM: ASOSIY HANDLER VA WORKER POOL (handle_update + run_polling)
+# ============================================================================
+
+# Doimiy tayyor turuvchi Worker Pool (har bir xabarda yangi Thread ochishga vaqt ketmaydi!)
 _UPDATE_QUEUE: "queue.Queue[Dict[str, Any]]" = queue.Queue()
+
 
 def _update_worker_loop() -> None:
     while True:
@@ -1606,6 +1742,7 @@ def _update_worker_loop() -> None:
             print(f"[Worker xatoligi]: {exc}")
         finally:
             _UPDATE_QUEUE.task_done()
+
 
 def handle_update(update: Dict[str, Any], host: str = "") -> None:
     """Telegram update obyektini tezkor va xavfsiz qayta ishlaydi."""
@@ -1628,6 +1765,7 @@ def handle_update(update: Dict[str, Any], host: str = "") -> None:
         elif update.get("message"):
             msg_t = (update["message"].get("text") or "<media>")[:40]
             print(f"⚡ [XABAR] text='{msg_t}' ({elapsed:.2f}s)")
+
 
 def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
     if not update:
@@ -1669,6 +1807,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
     if not active_uid:
         return
 
+    # Yangi foydalanuvchini ro'yxatga olish
     if message and cid:
         # /start user<id> uchun oldin mavjudligini eslab qolamiz
         existing_user = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (cid,))
@@ -1683,6 +1822,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         return
 
     global ADMIN
+    # Agar ADMIN_ID hali o'rnatilmagan bo'lsa (yoki raqam bo'lmasa), birinchi foydalanuvchini avtomatik Admin qilamiz
     saved_admin = get_file("set/admin_id.txt").strip()
     if saved_admin and (not ADMIN.isdigit()):
         ADMIN = saved_admin
@@ -1691,6 +1831,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         put_file("set/admin_id.txt", ADMIN)
         print(f"Avtomatik Admin belgilandi! ADMIN_ID = {ADMIN}")
 
+    # Emoji variation selector (\ufe0f) va turli apostrof (', ‘, ’, `) farqlarini yo'qotish
     if text:
         clean_t = (
             text.replace("\ufe0f", "")
@@ -1735,6 +1876,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         sms(cid, f"⚠️ Boshqaruv paneliga kirish uchun tg.py faylidagi <b>ADMIN_ID</b> ga o'z ID raqamingizni yozing:\n\nSizning ID raqamingiz: <code>{cid}</code>")
         return
 
+    # /start user<ref_id> referal tizimi
     if text and text.startswith("/start user"):
         ref_user_num = text.replace("/start user", "").strip()
         ref_row = database.fetch_one("SELECT * FROM `users` WHERE `user_id` = ?", (ref_user_num,))
@@ -1748,6 +1890,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
                 sms(cid, "⚠️ Siz bizning botimizda allaqachon mavjudsiz.", m_kb)
                 return
             else:
+                put_file(f"user/{cid}.inviter", refid)
                 if joinchat(cid):
                     ref_u = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (refid,))
                     cur_bal = float(ref_u["balance"]) if ref_u else 0.0
@@ -1769,9 +1912,11 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
     if message and cid and not existing_user:
         adduser(cid)
 
+    # Orqaga / Boshqaruv
+    # Agar foydalanuvchi asosiy menyu tugmalaridan birini bossa, eski tugallanmagan step'ni tozalaymiz
     MAIN_BUTTONS = {
         "/start", "/admin", "/panel", "➡️ Orqaga", "⏪ Orqaga", "🗄️ Boshqaruv",
-        "⚙️ Asosiy sozlamalar", "💳 Hamyonlar sozlamalari", "🔔 Xabar yuborish",
+        "⚙️ Asosiy sozlamalar", "💳 Hamyonlar sozlamalari", "💵 Pul ishlash sozlamalari", "🔔 Xabar yuborish",
         "📊 Statistika", "👤 Foydalanuvchini boshqarish", "🇺🇿 Valyuta kursi",
         "⏰ Cron sozlamasi", "🛍 Buyurtmalarni sozlash",
         "💵 Kursni o‘rnatish", "⚖️ Foizni o‘rnatish", "📊 Buyurtmani tekshirish",
@@ -1815,6 +1960,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         sms(cid, start_msg, m_kb)
         return
 
+    # Majburiy obuna tekshirish ("result")
     if data == "result" and joinchat(chat_id):
         usid = get_file(f"user/{chat_id}.id").strip()
         if usid:
@@ -1997,6 +2143,10 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         unlink_file(f"user/{cid}.step")
         return
 
+    # ========================================================================
+    # ADMIN PANEL: Boshqa sozlamalar (Matnlar, Hamyonlar, Avto to'lov, Referal)
+    # ========================================================================
+
     if text == "💳 Hamyonlar sozlamalari" and cid == ADMIN:
         delturi = get_file("set/payments.txt")
         lines = [ln.strip() for ln in delturi.split("\n") if ln.strip()]
@@ -2011,6 +2161,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             cid,
             "⭐ Kerakli bo'limni tanlang:",
             keyboard([
+                [{"text": "💵 Pul ishlash sozlamalari", "callback_data": "adm_earn=home"}],
                 [{"text": "📑 Matnlar sozlamalari", "callback_data": "birlamch=matn"}],
                 [{"text": "💳 Hamyonlar sozlamalari", "callback_data": "birlamch=cards"}],
                 [{"text": "💳 Avto tolov sozlamalari", "callback_data": "birlamch=autopays"}],
@@ -2245,6 +2396,10 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         unlink_file(f"user/{cid}.step")
         return
 
+    # ========================================================================
+    # ADMIN PANEL: Buyurtmani tekshirish va API Sozlamalari (Provayderlar)
+    # ========================================================================
+
     if text == "📊 Buyurtmani tekshirish" and joinchat(cid):
         stati = database.count_rows("orders")
         sms(cid, f"🔢 Barcha buyurtmalar: {stati} ta\n\n➡️ Buyurtma IDsini kiriting:", AORT_KB)
@@ -2405,6 +2560,10 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             edit(chat_id, message_id, "Provayderni tanlang:\n\n" + "\n".join(prs_lines), keyboard(kb_rows))
         return
 
+    # ========================================================================
+    # FOYDALANUVCHI: Hamkorlik dasturi (Bo't yaratish + SMM API)
+    # ========================================================================
+
     if text == "🤝 Hamkorlik dasturi" and joinchat(cid):
         sms(
             cid,
@@ -2451,8 +2610,10 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         elif sub == "bot":
             rew = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (chat_id,)) or {}
             u_bal_str = fmt_money(rew.get("balance", "0"))
+            dyn_bot_price = float(get_file("set/bot_price.txt").strip() or BOT_CODE_PRICE)
+            dyn_price_str = fmt_money(dyn_bot_price)
             already_bought = get_file(f"user/{chat_id}.bot_bought").strip() == "1"
-            buy_btn_txt = "📥 Bo‘t kodini qayta yuklab olish (Bepul)" if already_bought else "📥 Bo‘t kodini sotib olish (70 000 so‘m)"
+            buy_btn_txt = "📥 Bo‘t kodini qayta yuklab olish (Bepul)" if already_bought else f"📥 Bo‘t kodini sotib olish ({dyn_price_str} so‘m)"
             edit(
                 chat_id,
                 message_id,
@@ -2461,9 +2622,9 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
                 f"✨ <b>Imkoniyatlari:</b>\n"
                 f"• Barcha SMM xizmatlar va API provayderlar ulanadi\n"
                 f"• Avto-to‘lov (Payme) va Karta orqali to‘lov tizimi\n"
-                f"• Saqlangan buyurtmalar, Referal va To‘liq Admin Panel\n"
+                f"• Saqlangan buyurtmalar, Kengaytirilgan Pul ishlash va To‘liq Admin Panel\n"
                 f"• Hech qanday qo‘shimcha kutubxonasiz 100% tayyor ishlaydi!\n\n"
-                f"💰 <b>Bo‘t kodi narxi:</b> <b>70 000 so‘m</b>\n"
+                f"💰 <b>Bo‘t kodi narxi:</b> <b>{dyn_price_str} so‘m</b>\n"
                 f"💵 <b>Sizning hisobingiz:</b> <b>{u_bal_str} so‘m</b>\n\n"
                 f"👇 <i>Bo‘t kodini fayl ko‘rinishida olish uchun quyidagi tugmani bosing:</i>",
                 keyboard([
@@ -2475,20 +2636,22 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         elif sub == "buy_bot":
             rew = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (chat_id,)) or {}
             u_bal = float(rew.get("balance") or 0)
+            dyn_bot_price = float(get_file("set/bot_price.txt").strip() or BOT_CODE_PRICE)
+            dyn_price_str = fmt_money(dyn_bot_price)
             already_bought = get_file(f"user/{chat_id}.bot_bought").strip() == "1"
-            if not already_bought and u_bal < BOT_CODE_PRICE:
+            if not already_bought and u_bal < dyn_bot_price:
                 bot(
                     "answerCallbackQuery",
                     {
                         "callback_query_id": cqid,
-                        "text": f"⛔️ Hisobingizda mablag‘ yetarli emas!\n\n💰 Bo‘t kodi narxi: 70 000 so‘m\n💵 Sizning hisobingiz: {fmt_money(u_bal)} so‘m",
+                        "text": f"⛔️ Hisobingizda mablag‘ yetarli emas!\n\n💰 Bo‘t kodi narxi: {dyn_price_str} so‘m\n💵 Sizning hisobingiz: {fmt_money(u_bal)} so‘m",
                         "show_alert": True,
                     },
                 )
                 return
 
             if not already_bought:
-                new_bal = round(u_bal - BOT_CODE_PRICE, 4)
+                new_bal = round(u_bal - dyn_bot_price, 4)
                 database.execute("UPDATE `users` SET `balance` = ? WHERE `id` = ?", (fmt_money(new_bal), chat_id))
                 put_file(f"user/{chat_id}.bot_bought", "1")
             else:
@@ -2551,6 +2714,10 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
                 ]),
             )
         return
+
+    # ========================================================================
+    # ADMIN PANEL: Bo'limlar, Ichki bo'limlar va Xizmatlarni sozlash
+    # ========================================================================
 
     if (text == "🛍 Buyurtmalarni sozlash" and cid == ADMIN) or data == "xsetting":
         target = ADMIN if text else chat_id
@@ -3008,7 +3175,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             btns = [{"text": enc("decode", s["category_name"]), "callback_data": f"editXizmats-{s['category_id']}"} for s in cats]
             kb_rows = chunk_list(btns, 3)
             kb_rows.append([{"text": "Orqaga", "callback_data": "editXiz"}])
-            edit(cid2, mid2, "<b>✅ Quyidagilardan birini tanlang:</b>", keyboard(kb_rows))
+            edit(cid2, mid2, "<b>Quyidagilardan birini tanlang:</b>", keyboard(kb_rows))
         return
 
     if data.startswith("editXizmats-"):
@@ -3025,7 +3192,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
                     seen.add(nm)
                     btns.append([{"text": nm, "callback_data": f"editXt-{s['cate_id']}"}])
             btns.append([{"text": "Orqaga", "callback_data": f"editXizmat-{bolim}"}])
-            edit(cid2, mid2, "<b>✅ Quyidagilardan birini tanlang:</b>", keyboard(btns))
+            edit(cid2, mid2, "<b>Quyidagilardan birini tanlang:</b>", keyboard(btns))
         return
 
     if data.startswith("editXt-"):
@@ -3041,7 +3208,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
                 btns.append({"text": str(idx), "callback_data": f"editXts-{s['service_id']}"})
             kb_rows = chunk_list(btns, 3)
             kb_rows.append([{"text": "Orqaga", "callback_data": f"editXizmats-{n}"}])
-            edit(cid2, mid2, "<b>✅ Quyidagilardan birini tanlang:\n\n" + "\n".join(txts) + "</b>", keyboard(kb_rows))
+            edit(cid2, mid2, "<b>Quyidagilardan birini tanlang:\n\n" + "\n".join(txts) + "</b>", keyboard(kb_rows))
         return
 
     if data.startswith("editXts-"):
@@ -3077,7 +3244,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             bot("answerCallbackQuery", {"callback_query_id": qid, "text": "⚠️ Bo‘limlar topilmadi!", "show_alert": True})
         else:
             btns = [{"text": enc("decode", s["category_name"]), "callback_data": f"deleteXiz-{s['category_id']}"} for s in cats]
-            edit(chat_id, message_id, "<b>✅ Quyidagilardan birini tanlang:</b>", keyboard(chunk_list(btns, 3)))
+            edit(chat_id, message_id, "<b>Quyidagilardan birini tanlang:</b>", keyboard(chunk_list(btns, 3)))
         return
 
     if data.startswith("deleteXiz-"):
@@ -3094,7 +3261,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
                     seen.add(nm)
                     btns.append([{"text": nm, "callback_data": f"delx-{s['cate_id']}"}])
             btns.append([{"text": "Orqaga", "callback_data": "newXiz"}])
-            edit(chat_id, message_id, "<b>✅ Quyidagilardan birini tanlang:</b>", keyboard(btns))
+            edit(chat_id, message_id, "<b>Quyidagilardan birini tanlang:</b>", keyboard(btns))
         return
 
     if data.startswith("delx-"):
@@ -3115,7 +3282,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         ichki = data.split("-")[1]
         database.execute("DELETE FROM `services` WHERE `service_id` = ?", (ichki,))
         del_msg(cid2, mid2)
-        sms(cid2, "✅ Xizmat o‘chirildi!", PANEL_KB)
+        sms(cid2, "Xizmat o‘chirildi!", PANEL_KB)
         return
 
     if data == "newXiz":
@@ -3154,7 +3321,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             adds = {"cate_id": pw, "category_id": get_file("set/c.txt").strip()}
             put_file("set/adds.json", json.dumps(adds, ensure_ascii=False))
             del_msg(chat_id, message_id)
-            sms(chat_id, "<b>✅ Yangi xizmat nomini yuboring:</b>", AORT_KB)
+            sms(chat_id, "<b>Yangi xizmat nomini yuboring:</b>", AORT_KB)
             put_file(f"user/{chat_id}.step", "servisw")
         return
 
@@ -3177,7 +3344,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         pw = data.split("-")[1]
         sms(
             chat_id,
-            "✅ Provayderning API xizmatlari bolimida korsatilgan valyutani tanlang:",
+            "Provayderning API xizmatlari bolimida korsatilgan valyutani tanlang:",
             keyboard([
                 [{"text": "UZS ", "callback_data": "checkP-UZS"}],
                 [{"text": "USD ", "callback_data": "checkP-USD"}],
@@ -3234,7 +3401,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
                 matched = el
                 break
         if not matched or (not matched.get("min") and not matched.get("max")):
-            sms(cid, "🔕 Noma'lum xatolik yuz berdi.\n\n✅ Qaytadan xizmat IDsini yuboring:")
+            sms(cid, "🔕 Noma'lum xatolik yuz berdi.\n\nQaytadan xizmat IDsini yuboring:")
         else:
             detail_json = json.dumps({
                 "name": matched.get("name", ""),
@@ -3267,6 +3434,10 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             sms(cid, "✅ Yangi xizmat qo'shildi.", PANEL2_KB)
             unlink_file(f"user/{cid}.step")
         return
+
+    # ========================================================================
+    # ADMIN PANEL: Kurs, Foiz, Foydalanuvchini boshqarish, Valyuta kursi
+    # ========================================================================
 
     if text == "💵 Kursni o‘rnatish" and cid == ADMIN:
         r_usd = get_file("set/usd").strip() or "0"
@@ -3318,7 +3489,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         return
 
     if text == "👤 Foydalanuvchini boshqarish" and cid == ADMIN:
-        sms(cid, "<b>✅ Kerakli foydalanuvchining ID raqamini kiriting:</b>", AORT_KB)
+        sms(cid, "<b>Kerakli foydalanuvchining ID raqamini kiriting:</b>", AORT_KB)
         put_file(f"user/{cid}.step", "iD")
         return
 
@@ -3339,7 +3510,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             )
             unlink_file(f"user/{cid}.step")
         else:
-            sms(cid, "<b>🤷‍♂️ Foydalanuvchi topilmadi.</b>\n\n✅ Qayta urinib ko'ring:")
+            sms(cid, "<b>Foydalanuvchi topilmadi.</b>\n\nQayta urinib ko'ring:")
         return
 
     if data == "plus":
@@ -3355,8 +3526,19 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
                 miqdor = float(rew.get("balance") or 0) + val
                 p2 = float(rew.get("outing") or 0) + val
                 database.execute("UPDATE `users` SET `balance` = ?, `outing` = ? WHERE `id` = ?", (str(miqdor), str(p2), saved))
-            sms(saved, f"<b>✅ Adminlar tomonidan hisobingiz {text} so‘m to'ldirildi</b>", MENU_USER_KB)
-            sms(cid, f"<b>✅ Foydalanuvchi hisobiga {text} so‘m qo'shildi!</b>", PANEL_KB)
+                # Referal keshbek bonusi (agar yoqilgan bo'lsa)
+                inviter_id = get_file(f"user/{saved}.inviter").strip()
+                if inviter_id and setting.get("ref_status") == "on" and val > 0:
+                    bonus_pct = float(setting.get("bonus") or 0)
+                    if bonus_pct > 0:
+                        ref_bonus_amt = round(val * (bonus_pct / 100.0), 2)
+                        inv_row = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (inviter_id,))
+                        if inv_row and ref_bonus_amt > 0:
+                            inv_bal = round(float(inv_row.get("balance") or 0) + ref_bonus_amt, 2)
+                            database.execute("UPDATE `users` SET `balance` = ? WHERE `id` = ?", (str(inv_bal), inviter_id))
+                            sms(inviter_id, f"🎁 <b>Referal bonusi!</b>\nSiz taklif qilgan foydalanuvchi hisobini to‘ldirdi va sizga <b>+{fmt_money(ref_bonus_amt)} so‘m ({bonus_pct}%)</b> bonus berildi!")
+            sms(saved, f"<b>Adminlar tomonidan hisobingiz {text} so‘m to'ldirildi</b>", MENU_USER_KB)
+            sms(cid, f"<b>Foydalanuvchi hisobiga {text} so‘m qo'shildi!</b>", PANEL_KB)
             unlink_file(f"user/{cid}.step")
         else:
             sms(cid, "<b>Faqat raqamlardan foydalaning!</b>")
@@ -3413,6 +3595,10 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         )
         return
 
+    # ========================================================================
+    # ADMIN PANEL: Majburiy obunalar
+    # ========================================================================
+
     if text == "📎 Majburiy obunalar" and cid == ADMIN:
         sms(
             cid,
@@ -3463,21 +3649,699 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         unlink_file(f"user/{cid}.step")
         return
 
-    if text == "💵 Pul ishlash" and joinchat(cid):
-        row = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (cid,)) or {}
-        myid = row.get("user_id", "")
+    # ========================================================================
+    # FOYDALANUVCHI: Pul ishlash (Referal), Buyurtmalar, Yordam, Balans va To'lov
+    # ========================================================================
+
+    # ========================================================================
+    # KENGAYTIRILGAN PUL ISHLASH TIZIMI + ADMIN BOSHQARUVI (100% SOZLANUVCHI)
+    # ========================================================================
+
+    def _build_earn_main_view(target_uid: str) -> Tuple[str, str]:
+        u_row = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (target_uid,)) or {}
+        myid = u_row.get("user_id", "1")
+        u_bal = fmt_money(u_row.get("balance", "0"))
         bot_user = get_bot_username()
-        ref_reward = enc("decode", setting.get("referal", "MTAw"))
-        sms(
-            cid,
-            f"Sizning referal havolangiz:\n\nhttps://t.me/{bot_user}?start=user{myid}\n\n"
-            f"Sizga har bir taklif qilgan referalingiz uchun {ref_reward} so'm beriladi.\n\n👤ID raqam: {myid}",
-            keyboard([[{"text": "💎 Konkurs (🏆 TOP 10)", "callback_data": "konkurs"}]]),
-        )
+        st_now = database.get_settings()
+        ref_reward = enc("decode", st_now.get("referal", "MTAw")) or "100"
+        ref_bonus_pct = st_now.get("bonus", "4")
+        ref_bonus_on = st_now.get("ref_status", "off") == "on"
+        daily_amt = get_file("set/daily_bonus.txt").strip() or "50"
+        daily_on = (get_file("set/daily_status.txt").strip() or "on") == "on"
+        my_refs = int(float(get_file(f"user/{target_uid}.users") or 0))
+
+        # Count available channels & tasks for this user
+        all_chs = database.fetch_all("SELECT * FROM `earn_channels` WHERE `status` = 'on'")
+        all_tsks = database.fetch_all("SELECT * FROM `earn_tasks` WHERE `status` = 'on'")
+        claimed_rows = database.fetch_all("SELECT `claim_type`, `item_id` FROM `earn_claims` WHERE `user_id` = ?", (target_uid,))
+        claimed_set = {(r["claim_type"], str(r["item_id"])) for r in claimed_rows}
+        avail_ch_cnt = sum(1 for c in all_chs if ("channel", str(c["id"])) not in claimed_set)
+        avail_tsk_cnt = sum(1 for t in all_tsks if ("task", str(t["id"])) not in claimed_set)
+
+        ref_link = f"https://t.me/{bot_user}?start=user{myid}"
+        share_url = f"https://t.me/share/url?url={urllib.parse.quote(ref_link)}&text={urllib.parse.quote('🚀 Eng arzon va tezkor SMM xizmatlar boti! Kirib bonus oling:')}"
+
+        custom_header = get_file("set/earn_header.txt").strip()
+        header_line = custom_header if custom_header else "💸 <b>Pul ishlash bo‘limiga xush kelibsiz!</b>"
+
+        msg_lines = [
+            header_line,
+            "",
+            f"🔗 <b>Sizning referal havolangiz:</b>",
+            f"{ref_link}",
+            "",
+            f"👥 Har bir taklif qilgan referalingiz uchun: <b>{ref_reward} so‘m</b>",
+        ]
+        if ref_bonus_on:
+            msg_lines.append(f"📈 Referalingiz hisob to‘ldirganda keshbek: <b>+{ref_bonus_pct}%</b>")
+        if daily_on:
+            msg_lines.append(f"🎁 Har 24 soatda kunlik bepul bonus: <b>+{daily_amt} so‘m</b>")
+        msg_lines.extend([
+            f"📊 Siz taklif qilgan do‘stlar: <b>{my_refs} ta</b>",
+            f"💵 Joriy balansingiz: <b>{u_bal} so‘m</b>",
+            f"👤 ID raqam: <code>{myid}</code>",
+            "",
+            "👇 <i>Quyidagi barcha usullar orqali hisobingizga bepul pul ishlashingiz mumkin:</i>",
+        ])
+
+        kb_rows: List[List[Dict[str, Any]]] = [
+            [{"text": "📤 Referal havolani ulashish", "url": share_url}],
+        ]
+        row2: List[Dict[str, Any]] = []
+        if daily_on:
+            row2.append({"text": f"🎁 Kunlik bonus (+{daily_amt} so‘m)", "callback_data": "earn=daily"})
+        row2.append({"text": f"📢 Obuna bo‘lish ({avail_ch_cnt} ta)", "callback_data": "earn=channels"})
+        kb_rows.append(row2)
+
+        kb_rows.append([
+            {"text": f"📋 Vazifalar ({avail_tsk_cnt} ta)", "callback_data": "earn=tasks"},
+            {"text": "🎟️ Promokod kiritish", "callback_data": "earn=promo"},
+        ])
+        kb_rows.append([
+            {"text": "💎 Konkurs (🏆 TOP 10)", "callback_data": "konkurs"},
+        ])
+        return "\n".join(msg_lines), keyboard(kb_rows)
+
+    if text == "💵 Pul ishlash" and joinchat(cid):
+        msg_txt, kb_json = _build_earn_main_view(cid)
+        sms(cid, msg_txt, kb_json)
+        return
+
+    if data == "earn=menu" and joinchat(chat_id):
+        msg_txt, kb_json = _build_earn_main_view(chat_id)
+        edit(chat_id, message_id, msg_txt, kb_json)
         return
 
     if data == "konkurs" and joinchat(chat_id):
-        edit(cid2, mid2, referal_top(10))
+        konkurs_header = get_file("set/konkurs_text.txt").strip() or (
+            "💎 <b>Referal Konkurs (🏆 TOP 10 Reyting)</b>\n\n"
+            "🎁 <b>Ko‘proq do‘stlaringizni taklif qiling va sovrinlarni yutib oling!</b>"
+        )
+        my_refs = int(float(get_file(f"user/{chat_id}.users") or 0))
+        top_txt = referal_top(10)
+        full_konkurs = (
+            f"{konkurs_header}\n\n"
+            f"🏆 <b>TOP 10 Ishtirokchilar:</b>\n{top_txt}\n\n"
+            f"📊 <b>Sizning natijangiz:</b> <code>{my_refs}</code> ta taklif"
+        )
+        edit(
+            cid2,
+            mid2,
+            full_konkurs,
+            keyboard([[{"text": "⬅️ Orqaga (Pul ishlash)", "callback_data": "earn=menu"}]]),
+        )
+        return
+
+    if data == "earn=daily" and joinchat(chat_id):
+        daily_on = (get_file("set/daily_status.txt").strip() or "on") == "on"
+        if not daily_on:
+            bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "⚠️ Kunlik bonus vaqtincha o‘chirilgan!", "show_alert": True})
+            return
+        last_ts = float(get_file(f"user/{chat_id}.daily_ts").strip() or 0)
+        now_ts = time.time()
+        diff = now_ts - last_ts
+        if diff < 86400:
+            rem = int(86400 - diff)
+            rem_h = rem // 3600
+            rem_m = (rem % 3600) // 60
+            bot(
+                "answerCallbackQuery",
+                {
+                    "callback_query_id": cqid,
+                    "text": f"⏳ Siz bugungi kunlik bonusni olgansiz!\n\nKeyingi bonusni {rem_h} soat {rem_m} daqiqadan so‘ng olishingiz mumkin.",
+                    "show_alert": True,
+                },
+            )
+            return
+        daily_amt = float(get_file("set/daily_bonus.txt").strip() or 50)
+        u_row = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (chat_id,)) or {}
+        new_b = round(float(u_row.get("balance") or 0) + daily_amt, 2)
+        database.execute("UPDATE `users` SET `balance` = ? WHERE `id` = ?", (fmt_money(new_b), chat_id))
+        put_file(f"user/{chat_id}.daily_ts", str(now_ts))
+        bot(
+            "answerCallbackQuery",
+            {
+                "callback_query_id": cqid,
+                "text": f"🎉 Tabriklaymiz! Hisobingizga +{fmt_money(daily_amt)} so‘m kunlik bonus qo‘shildi!",
+                "show_alert": True,
+            },
+        )
+        msg_txt, kb_json = _build_earn_main_view(chat_id)
+        edit(chat_id, message_id, msg_txt, kb_json)
+        return
+
+    if data == "earn=channels" and joinchat(chat_id):
+        all_chs = database.fetch_all("SELECT * FROM `earn_channels` WHERE `status` = 'on'")
+        claimed_rows = database.fetch_all(
+            "SELECT `item_id` FROM `earn_claims` WHERE `user_id` = ? AND `claim_type` = 'channel'",
+            (chat_id,),
+        )
+        claimed_ids = {str(r["item_id"]) for r in claimed_rows}
+        avail = [c for c in all_chs if str(c["id"]) not in claimed_ids]
+        if not avail:
+            edit(
+                chat_id,
+                message_id,
+                "📢 <b>Kanalga obuna bo‘lib pul ishlash</b>\n\n"
+                "🤷‍♂️ Hozircha siz uchun yangi pullik kanallar yo‘q (yoki barchasidan bonus olgansiz).\n"
+                "<i>Tez orada yangi kanallar qo‘shiladi!</i>",
+                keyboard([[{"text": "⬅️ Orqaga", "callback_data": "earn=menu"}]]),
+            )
+            return
+        kb_rows = []
+        lines = ["📢 <b>Quyidagi kanallarga obuna bo‘ling va «✅ Tekshirish» tugmasini bosib pul oling:</b>\n"]
+        for idx, c in enumerate(avail, start=1):
+            ch_user = c["channel_username"].lstrip("@")
+            rew_str = fmt_money(c["reward"])
+            title_str = c.get("title") or f"@{ch_user}"
+            lines.append(f"<b>{idx}. {title_str}</b> (@{ch_user}) — 💰 <b>+{rew_str} so‘m</b>")
+            kb_rows.append([
+                {"text": f"📢 {idx}. Kanalga kirish (@{ch_user})", "url": f"https://t.me/{ch_user}"},
+                {"text": f"✅ Tekshirish (+{rew_str} so‘m)", "callback_data": f"earn_chk_ch={c['id']}"},
+            ])
+        kb_rows.append([{"text": "⬅️ Orqaga", "callback_data": "earn=menu"}])
+        edit(chat_id, message_id, "\n".join(lines), keyboard(kb_rows))
+        return
+
+    if data.startswith("earn_chk_ch=") and joinchat(chat_id):
+        ch_id = data.split("=", 1)[1]
+        already = database.fetch_one(
+            "SELECT * FROM `earn_claims` WHERE `user_id` = ? AND `claim_type` = 'channel' AND `item_id` = ?",
+            (chat_id, ch_id),
+        )
+        if already:
+            bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "⚠️ Siz ushbu kanal uchun bonusni allaqachon olgansiz!", "show_alert": True})
+            return
+        ch_row = database.fetch_one("SELECT * FROM `earn_channels` WHERE `id` = ? AND `status` = 'on'", (ch_id,))
+        if not ch_row:
+            bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "⚠️ Kanal topilmadi yoki faol emas!", "show_alert": True})
+            return
+        clean_ch = ch_row["channel_username"].lstrip("@")
+        ret = bot("getChatMember", {"chat_id": f"@{clean_ch}", "user_id": chat_id})
+        stat = ret.get("result", {}).get("status", "") if isinstance(ret.get("result"), dict) else ""
+        if stat not in ("creator", "administrator", "member"):
+            bot(
+                "answerCallbackQuery",
+                {
+                    "callback_query_id": cqid,
+                    "text": f"❌ Siz hali @{clean_ch} kanaliga obuna bo‘lmagansiz!\nAvval kanalga a'zo bo‘lib, so‘ng Tekshirishni bosing.",
+                    "show_alert": True,
+                },
+            )
+            return
+        rew_val = float(ch_row.get("reward") or 0)
+        u_row = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (chat_id,)) or {}
+        new_b = round(float(u_row.get("balance") or 0) + rew_val, 2)
+        database.execute("UPDATE `users` SET `balance` = ? WHERE `id` = ?", (fmt_money(new_b), chat_id))
+        database.execute(
+            "INSERT INTO `earn_claims` (`user_id`, `claim_type`, `item_id`, `claimed_at`) VALUES (?, 'channel', ?, ?)",
+            (chat_id, str(ch_id), datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        bot(
+            "answerCallbackQuery",
+            {
+                "callback_query_id": cqid,
+                "text": f"✅ Obuna tasdiqlandi! Hisobingizga +{fmt_money(rew_val)} so‘m qo‘shildi!",
+                "show_alert": True,
+            },
+        )
+        msg_txt, kb_json = _build_earn_main_view(chat_id)
+        edit(chat_id, message_id, msg_txt, kb_json)
+        return
+
+    if data == "earn=tasks" and joinchat(chat_id):
+        all_tsks = database.fetch_all("SELECT * FROM `earn_tasks` WHERE `status` = 'on'")
+        claimed_rows = database.fetch_all(
+            "SELECT `item_id` FROM `earn_claims` WHERE `user_id` = ? AND `claim_type` = 'task'",
+            (chat_id,),
+        )
+        claimed_ids = {str(r["item_id"]) for r in claimed_rows}
+        avail = [t for t in all_tsks if str(t["id"]) not in claimed_ids]
+        if not avail:
+            edit(
+                chat_id,
+                message_id,
+                "📋 <b>Vazifa bajarib pul ishlash</b>\n\n"
+                "🤷‍♂️ Hozircha yangi vazifalar yo‘q (yoki barcha vazifalarni bajargansiz).\n"
+                "<i>Yangi vazifalar qo‘shilishi bilan shu yerda chiqadi!</i>",
+                keyboard([[{"text": "⬅️ Orqaga", "callback_data": "earn=menu"}]]),
+            )
+            return
+        lines = ["📋 <b>Mavjud vazifalar ro‘yxati:</b>\n"]
+        kb_rows = []
+        for idx, t in enumerate(avail, start=1):
+            rew_str = fmt_money(t["reward"])
+            v_label = "⚡ Avto-tekshirish" if t.get("verify_type") == "auto" else "📸 Skrinshot bilan"
+            lines.append(
+                f"🔹 <b>{idx}. {t['title']}</b> (+<b>{rew_str} so‘m</b> | {v_label})\n"
+                f"   📝 Shart: {t.get('description') or 'Havolaga o‘tib vazifani bajaring'}"
+            )
+            row_btns = []
+            if t.get("url") and ("http://" in t["url"] or "https://" in t["url"] or "t.me/" in t["url"]):
+                u_link = t["url"] if t["url"].startswith("http") else f"https://{t['url']}"
+                row_btns.append({"text": f"🔗 {idx}-vazifaga o‘tish", "url": u_link})
+            row_btns.append({"text": f"✅ Bajarildi (+{rew_str} so‘m)", "callback_data": f"earn_do_task={t['id']}"})
+            kb_rows.append(row_btns)
+        kb_rows.append([{"text": "⬅️ Orqaga", "callback_data": "earn=menu"}])
+        edit(chat_id, message_id, "\n\n".join(lines), keyboard(kb_rows))
+        return
+
+    if data.startswith("earn_do_task=") and joinchat(chat_id):
+        tsk_id = data.split("=", 1)[1]
+        already = database.fetch_one(
+            "SELECT * FROM `earn_claims` WHERE `user_id` = ? AND `claim_type` = 'task' AND `item_id` = ?",
+            (chat_id, tsk_id),
+        )
+        if already:
+            bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "⚠️ Siz bu vazifani allaqachon bajargansiz!", "show_alert": True})
+            return
+        t_row = database.fetch_one("SELECT * FROM `earn_tasks` WHERE `id` = ? AND `status` = 'on'", (tsk_id,))
+        if not t_row:
+            bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "⚠️ Vazifa topilmadi!", "show_alert": True})
+            return
+        if t_row.get("verify_type") == "auto":
+            rew_val = float(t_row.get("reward") or 0)
+            u_row = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (chat_id,)) or {}
+            new_b = round(float(u_row.get("balance") or 0) + rew_val, 2)
+            database.execute("UPDATE `users` SET `balance` = ? WHERE `id` = ?", (fmt_money(new_b), chat_id))
+            database.execute(
+                "INSERT INTO `earn_claims` (`user_id`, `claim_type`, `item_id`, `claimed_at`) VALUES (?, 'task', ?, ?)",
+                (chat_id, str(tsk_id), datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            )
+            bot(
+                "answerCallbackQuery",
+                {
+                    "callback_query_id": cqid,
+                    "text": f"✅ Vazifa bajarildi! Hisobingizga +{fmt_money(rew_val)} so‘m qo‘shildi!",
+                    "show_alert": True,
+                },
+            )
+            msg_txt, kb_json = _build_earn_main_view(chat_id)
+            edit(chat_id, message_id, msg_txt, kb_json)
+        else:
+            del_msg(chat_id, message_id)
+            sms(
+                chat_id,
+                f"📸 <b>«{t_row['title']}»</b> vazifasini bajarganingizni tasdiqlovchi <b>skrinshot (rasm)</b> yoki izohni yuboring.\n\n"
+                f"💰 Mukofot: <b>{fmt_money(t_row['reward'])} so‘m</b>",
+                ORT_KB,
+            )
+            put_file(f"user/{chat_id}.step", f"task_proof={tsk_id}")
+        return
+
+    if step.startswith("task_proof=") and (photo or text) and joinchat(cid):
+        tsk_id = step.split("=", 1)[1]
+        t_row = database.fetch_one("SELECT * FROM `earn_tasks` WHERE `id` = ?", (tsk_id,))
+        if t_row:
+            bot("forwardMessage", {"chat_id": ADMIN, "from_chat_id": cid, "message_id": mid})
+            sms(
+                ADMIN,
+                f"📋 <b>Vazifa tekshiruvi!</b>\n"
+                f"👤 Foydalanuvchi: <a href='tg://user?id={cid}'>{cid}</a>\n"
+                f"📌 Vazifa: <b>{t_row['title']}</b>\n"
+                f"💰 Mukofot: <b>{fmt_money(t_row['reward'])} so‘m</b>",
+                keyboard([
+                    [
+                        {"text": f"✅ Tasdiqlash (+{fmt_money(t_row['reward'])} so‘m)", "callback_data": f"task_ok={cid}={tsk_id}"},
+                        {"text": "❌ Rad etish", "callback_data": f"task_no={cid}={tsk_id}"},
+                    ]
+                ]),
+            )
+        sms(cid, "✅ Ma'lumot Adminga yuborildi! Tekshirilib tasdiqlangach hisobingizga pul qo‘shiladi.", m_kb)
+        unlink_file(f"user/{cid}.step")
+        return
+
+    if data.startswith("task_ok=") and chat_id == ADMIN:
+        parts = data.split("=")
+        u_target, tsk_id = parts[1], parts[2]
+        already = database.fetch_one(
+            "SELECT * FROM `earn_claims` WHERE `user_id` = ? AND `claim_type` = 'task' AND `item_id` = ?",
+            (u_target, tsk_id),
+        )
+        if already:
+            bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "⚠️ Allaqachon tasdiqlangan!", "show_alert": True})
+            return
+        t_row = database.fetch_one("SELECT * FROM `earn_tasks` WHERE `id` = ?", (tsk_id,))
+        rew_val = float(t_row.get("reward") or 0) if t_row else 0.0
+        u_row = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (u_target,)) or {}
+        new_b = round(float(u_row.get("balance") or 0) + rew_val, 2)
+        database.execute("UPDATE `users` SET `balance` = ? WHERE `id` = ?", (fmt_money(new_b), u_target))
+        database.execute(
+            "INSERT INTO `earn_claims` (`user_id`, `claim_type`, `item_id`, `claimed_at`) VALUES (?, 'task', ?, ?)",
+            (u_target, str(tsk_id), datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        edit(chat_id, message_id, f"✅ Foydalanuvchi ({u_target}) vazifasi tasdiqlandi va +{fmt_money(rew_val)} so‘m berildi!")
+        sms(u_target, f"🎉 <b>Vazifangiz Admin tomonidan tasdiqlandi!</b>\n💰 Hisobingizga <b>+{fmt_money(rew_val)} so‘m</b> qo‘shildi!")
+        return
+
+    if data.startswith("task_no=") and chat_id == ADMIN:
+        parts = data.split("=")
+        u_target = parts[1]
+        edit(chat_id, message_id, f"❌ Foydalanuvchi ({u_target}) vazifasi rad etildi.")
+        sms(u_target, "❌ Siz yuborgan vazifa tasdiqlanmadi. Shartlarni to‘liq bajarib qayta urinib ko‘ring.")
+        return
+
+    if data == "earn=promo" and joinchat(chat_id):
+        del_msg(chat_id, message_id)
+        sms(chat_id, "🎟️ <b>Promokodni kiriting:</b>\n\n<i>Agar sizda promokod bo‘lsa, uni shu yerga yozib yuboring va bonus pul oling:</i>", ORT_KB)
+        put_file(f"user/{chat_id}.step", "enter_promo")
+        return
+
+    if step == "enter_promo" and text and joinchat(cid):
+        code_str = text.strip()
+        p_row = database.fetch_one("SELECT * FROM `promocodes` WHERE UPPER(`code`) = UPPER(?) AND `status` = 'on'", (code_str,))
+        if not p_row:
+            sms(cid, "❌ Bunday promokod topilmadi yoki muddati tugagan! Qaytadan tekshirib yozing:", ORT_KB)
+            return
+        if int(p_row.get("used_count") or 0) >= int(p_row.get("max_uses") or 0):
+            sms(cid, "⚠️ Ushbu promokodning foydalanish limiti tugagan!", m_kb)
+            unlink_file(f"user/{cid}.step")
+            return
+        already = database.fetch_one(
+            "SELECT * FROM `earn_claims` WHERE `user_id` = ? AND `claim_type` = 'promo' AND `item_id` = ?",
+            (cid, str(p_row["id"])),
+        )
+        if already:
+            sms(cid, "⚠️ Siz ushbu promokoddan allaqachon foydalangansiz!", m_kb)
+            unlink_file(f"user/{cid}.step")
+            return
+        rew_val = float(p_row.get("reward") or 0)
+        u_row = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (cid,)) or {}
+        new_b = round(float(u_row.get("balance") or 0) + rew_val, 2)
+        database.execute("UPDATE `users` SET `balance` = ? WHERE `id` = ?", (fmt_money(new_b), cid))
+        database.execute("UPDATE `promocodes` SET `used_count` = `used_count` + 1 WHERE `id` = ?", (p_row["id"],))
+        database.execute(
+            "INSERT INTO `earn_claims` (`user_id`, `claim_type`, `item_id`, `claimed_at`) VALUES (?, 'promo', ?, ?)",
+            (cid, str(p_row["id"]), datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        unlink_file(f"user/{cid}.step")
+        sms(
+            cid,
+            f"🎉 <b>Promokod (<code>{p_row['code']}</code>) muvaffaqiyatli faollashtirildi!</b>\n\n"
+            f"💰 Hisobingizga: <b>+{fmt_money(rew_val)} so‘m</b> qo‘shildi!\n"
+            f"💵 Yangi balansingiz: <b>{fmt_money(new_b)} so‘m</b>",
+            m_kb,
+        )
+        return
+
+    # ========================================================================
+    # ADMIN PANEL: 💵 PUL ISHLASH SOZLAMALARI (HAMMASINI BOSHQARISH)
+    # ========================================================================
+
+    def _build_admin_earn_panel() -> Tuple[str, str]:
+        st_now = database.get_settings()
+        ref_reward = enc("decode", st_now.get("referal", "MTAw")) or "100"
+        ref_bonus_pct = st_now.get("bonus", "4")
+        ref_on = st_now.get("ref_status", "off") == "on"
+        daily_amt = get_file("set/daily_bonus.txt").strip() or "50"
+        daily_on = (get_file("set/daily_status.txt").strip() or "on") == "on"
+        bot_price = fmt_money(get_file("set/bot_price.txt").strip() or BOT_CODE_PRICE)
+        ch_cnt = database.count_rows("earn_channels")
+        tsk_cnt = database.count_rows("earn_tasks")
+        prm_cnt = database.count_rows("promocodes")
+
+        txt = (
+            "💵 <b>Pul ishlash bo‘limi — To‘liq Admin Boshqaruvi</b>\n\n"
+            f"1️⃣ <b>Referal mukofoti (1 ta taklif):</b> <code>{ref_reward} so‘m</code>\n"
+            f"2️⃣ <b>Referal depozit keshbek foizi:</b> <code>{ref_bonus_pct}%</code> ({'✅ Yoqilgan' if ref_on else '❌ O‘chirilgan'})\n"
+            f"3️⃣ <b>Kunlik bepul bonus:</b> <code>{daily_amt} so‘m</code> ({'✅ Yoqilgan' if daily_on else '❌ O‘chirilgan'})\n"
+            f"4️⃣ <b>Pullik obuna kanallari:</b> <code>{ch_cnt} ta</code>\n"
+            f"5️⃣ <b>Maxsus vazifalar:</b> <code>{tsk_cnt} ta</code>\n"
+            f"6️⃣ <b>Promokodlar:</b> <code>{prm_cnt} ta</code>\n"
+            f"7️⃣ <b>Hamkorlikdagi Bo‘t kodi narxi:</b> <code>{bot_price} so‘m</code>\n\n"
+            "👇 <i>O‘zgartirmoqchi bo‘lgan bo‘limingizni tanlang:</i>"
+        )
+        kb = keyboard([
+            [
+                {"text": f"👥 Referal narxi ({ref_reward} so‘m)", "callback_data": "adm_earn=ref_price"},
+                {"text": f"📈 Depozit foizi ({ref_bonus_pct}%)", "callback_data": "adm_earn=ref_bonus"},
+            ],
+            [
+                {"text": f"🎁 Kunlik bonus ({daily_amt} so‘m)", "callback_data": "adm_earn=daily"},
+                {"text": f"Kunlik: {'✅ ON' if daily_on else '❌ OFF'}", "callback_data": "adm_earn=toggle_daily"},
+            ],
+            [
+                {"text": f"📢 Obuna kanallar ({ch_cnt})", "callback_data": "adm_earn=channels"},
+                {"text": f"📋 Vazifalar ({tsk_cnt})", "callback_data": "adm_earn=tasks"},
+            ],
+            [
+                {"text": f"🎟️ Promokodlar ({prm_cnt})", "callback_data": "adm_earn=promos"},
+                {"text": "💎 Konkurs sozlamalari", "callback_data": "adm_earn=konkurs"},
+            ],
+            [
+                {"text": "📝 Pul ishlash sarlavha matni", "callback_data": "adm_earn=header"},
+                {"text": f"🤖 Bo‘t narxi ({bot_price})", "callback_data": "adm_earn=bot_price"},
+            ],
+        ])
+        return txt, kb
+
+    if text == "💵 Pul ishlash sozlamalari" and cid == ADMIN:
+        p_txt, p_kb = _build_admin_earn_panel()
+        sms(cid, p_txt, p_kb)
+        return
+
+    if data.startswith("adm_earn=") and chat_id == ADMIN:
+        act = data.split("=", 1)[1]
+        if act == "home":
+            p_txt, p_kb = _build_admin_earn_panel()
+            edit(chat_id, message_id, p_txt, p_kb)
+        elif act == "ref_price":
+            cur_ref = enc("decode", setting.get("referal", "MTAw")) or "100"
+            del_msg(chat_id, message_id)
+            sms(chat_id, f"👥 <b>1 ta taklif qilingan referal uchun mukofot summasini kiriting (so‘mda):</b>\n\nJoriy narx: <code>{cur_ref}</code> so‘m", AORT_KB)
+            put_file(f"user/{chat_id}.step", "adm_set_ref_price")
+        elif act == "ref_bonus":
+            cur_st = database.get_settings().get("ref_status", "off")
+            cur_b = database.get_settings().get("bonus", "4")
+            edit(
+                chat_id,
+                message_id,
+                f"📈 <b>Referal hisob to‘ldirganda beriladigan keshbek foizi:</b> <code>{cur_b}%</code>\n"
+                f"Holati: {'✅ Yoqilgan' if cur_st == 'on' else '❌ O‘chirilgan'}",
+                keyboard([
+                    [{"text": "🔄 Yoqish / O‘chirish (ON/OFF)", "callback_data": "adm_earn=toggle_ref_st"}],
+                    [{"text": "✏️ Foizni (%) o‘zgartirish", "callback_data": "referr=edit"}],
+                    [{"text": "⬅️ Orqaga", "callback_data": "adm_earn=home"}],
+                ]),
+            )
+        elif act == "toggle_ref_st":
+            cur_st = database.get_settings().get("ref_status", "off")
+            new_st = "off" if cur_st == "on" else "on"
+            database.execute("UPDATE `settings` SET `ref_status` = ? WHERE `id` = 1", (new_st,))
+            p_txt, p_kb = _build_admin_earn_panel()
+            edit(chat_id, message_id, p_txt, p_kb)
+        elif act == "toggle_daily":
+            cur_d = (get_file("set/daily_status.txt").strip() or "on")
+            put_file("set/daily_status.txt", "off" if cur_d == "on" else "on")
+            p_txt, p_kb = _build_admin_earn_panel()
+            edit(chat_id, message_id, p_txt, p_kb)
+        elif act == "daily":
+            cur_amt = get_file("set/daily_bonus.txt").strip() or "50"
+            del_msg(chat_id, message_id)
+            sms(chat_id, f"🎁 <b>Kunlik bonus miqdorini kiriting (so‘mda):</b>\n\nJoriy miqdor: <code>{cur_amt}</code> so‘m", AORT_KB)
+            put_file(f"user/{chat_id}.step", "adm_set_daily_amt")
+        elif act == "bot_price":
+            cur_bp = get_file("set/bot_price.txt").strip() or str(BOT_CODE_PRICE)
+            del_msg(chat_id, message_id)
+            sms(chat_id, f"🤖 <b>Hamkorlik bo‘limidagi Bo‘t kodi narxini kiriting (so‘mda):</b>\n\nJoriy narx: <code>{cur_bp}</code> so‘m", AORT_KB)
+            put_file(f"user/{chat_id}.step", "adm_set_bot_price")
+        elif act == "header":
+            del_msg(chat_id, message_id)
+            sms(chat_id, "📝 <b>Pul ishlash bo‘limi sarlavha matnini yuboring:</b>", AORT_KB)
+            put_file(f"user/{chat_id}.step", "adm_set_earn_header")
+        elif act == "channels":
+            chs = database.fetch_all("SELECT * FROM `earn_channels`")
+            kb_rows = [[{"text": f"🗑️ @{c['channel_username'].lstrip('@')} ({c['reward']} so‘m) — O‘chirish", "callback_data": f"adm_del_ech={c['id']}"}] for c in chs]
+            kb_rows.append([{"text": "➕ Yangi pullik kanal qo‘shish", "callback_data": "adm_earn=add_ch"}])
+            kb_rows.append([{"text": "⬅️ Orqaga", "callback_data": "adm_earn=home"}])
+            edit(chat_id, message_id, "📢 <b>Pullik obuna kanallari ro‘yxati:</b>\n<i>Foydalanuvchi shu kanallarga a'zo bo‘lib mukofot oladi (bot kanalda admin bo‘lishi kerak).</i>", keyboard(kb_rows))
+        elif act == "add_ch":
+            del_msg(chat_id, message_id)
+            sms(chat_id, "📢 <b>Kanal username va mukofot summasini quyidagi formatda yuboring:</b>\n\n<code>@kanal_user 200 Kanal Nomi</code>\n\n<i>Masalan:</i> <code>@antaarab_smm 150 Antaarab Rasmiy Kanali</code>", AORT_KB)
+            put_file(f"user/{chat_id}.step", "adm_add_earn_ch")
+        elif act == "tasks":
+            tsks = database.fetch_all("SELECT * FROM `earn_tasks`")
+            kb_rows = [[{"text": f"🗑️ {t['title']} ({t['reward']} so‘m) — O‘chirish", "callback_data": f"adm_del_etsk={t['id']}"}] for t in tsks]
+            kb_rows.append([{"text": "➕ Yangi vazifa qo‘shish (Avto)", "callback_data": "adm_earn=add_tsk_auto"}])
+            kb_rows.append([{"text": "➕ Yangi vazifa qo‘shish (Skrinshot bilan)", "callback_data": "adm_earn=add_tsk_proof"}])
+            kb_rows.append([{"text": "⬅️ Orqaga", "callback_data": "adm_earn=home"}])
+            edit(chat_id, message_id, "📋 <b>Pul ishlash vazifalari boshqaruvi:</b>", keyboard(kb_rows))
+        elif act in ("add_tsk_auto", "add_tsk_proof"):
+            v_mode = "auto" if act == "add_tsk_auto" else "proof"
+            put_file("set/tmp_tsk_mode.txt", v_mode)
+            del_msg(chat_id, message_id)
+            sms(
+                chat_id,
+                "📋 <b>Yangi vazifa ma'lumotlarini 4 qatorda yuboring:</b>\n\n"
+                "1-qator: Vazifa nomi\n"
+                "2-qator: Vazifa sharti (izoh)\n"
+                "3-qator: Havola (https://...)\n"
+                "4-qator: Mukofot summasi (faqat raqam, masalan: 250)",
+                AORT_KB,
+            )
+            put_file(f"user/{chat_id}.step", "adm_add_earn_tsk")
+        elif act == "promos":
+            prms = database.fetch_all("SELECT * FROM `promocodes`")
+            kb_rows = [
+                [{"text": f"🗑️ {p['code']} ({p['reward']} so‘m | {p['used_count']}/{p['max_uses']}) — O‘chirish", "callback_data": f"adm_del_prm={p['id']}"}]
+                for p in prms
+            ]
+            kb_rows.append([{"text": "➕ Yangi promokod yaratish", "callback_data": "adm_earn=add_prm"}])
+            kb_rows.append([{"text": "⬅️ Orqaga", "callback_data": "adm_earn=home"}])
+            edit(chat_id, message_id, "🎟️ <b>Promokodlar ro‘yxati va boshqaruvi:</b>", keyboard(kb_rows))
+        elif act == "add_prm":
+            del_msg(chat_id, message_id)
+            sms(
+                chat_id,
+                "🎟️ <b>Yangi promokod ma'lumotlarini bo‘sh joy bilan yuboring:</b>\n\n"
+                "<code>KOD SUMMA LIMIT</code>\n\n"
+                "<i>Masalan (50 kishi uchun 500 so‘mlik promokod):</i>\n"
+                "<code>BONUS2026 500 50</code>",
+                AORT_KB,
+            )
+            put_file(f"user/{chat_id}.step", "adm_add_promo")
+        elif act == "konkurs":
+            edit(
+                chat_id,
+                message_id,
+                "💎 <b>Konkurs (🏆 TOP 10) sozlamalari:</b>",
+                keyboard([
+                    [{"text": "📝 Konkurs matni va sovrinlarini o‘zgartirish", "callback_data": "adm_earn=edit_konkurs_txt"}],
+                    [{"text": "🔄 Konkurs reytingini 0 ga tushirish", "callback_data": "adm_earn=reset_konkurs"}],
+                    [{"text": "⬅️ Orqaga", "callback_data": "adm_earn=home"}],
+                ]),
+            )
+        elif act == "edit_konkurs_txt":
+            del_msg(chat_id, message_id)
+            sms(
+                chat_id,
+                "💎 <b>Konkurs bo‘limi uchun yangi matn va sovrinlar ro‘yxatini yuboring:</b>\n\n"
+                "<i>Masalan:\n🏆 Konkurs sovrinlari:\n🥇 1-o‘rin: 50 000 so‘m\n🥈 2-o‘rin: 30 000 so‘m\n🥉 3-o‘rin: 15 000 so‘m</i>",
+                AORT_KB,
+            )
+            put_file(f"user/{chat_id}.step", "adm_set_konkurs_txt")
+        elif act == "reset_konkurs":
+            for path in glob.glob(os.path.join(config.USER_DIR, "*.users")):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            for k in list(_FILE_CACHE.keys()):
+                if k.endswith(".users"):
+                    del _FILE_CACHE[k]
+            bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "✅ Konkurs TOP-10 reytingi 0 ga tushirildi!", "show_alert": True})
+            p_txt, p_kb = _build_admin_earn_panel()
+            edit(chat_id, message_id, p_txt, p_kb)
+        return
+
+    if data.startswith("adm_del_ech=") and chat_id == ADMIN:
+        ch_id = data.split("=", 1)[1]
+        database.execute("DELETE FROM `earn_channels` WHERE `id` = ?", (ch_id,))
+        bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "🗑️ Kanal o‘chirildi!"})
+        p_txt, p_kb = _build_admin_earn_panel()
+        edit(chat_id, message_id, p_txt, p_kb)
+        return
+
+    if data.startswith("adm_del_etsk=") and chat_id == ADMIN:
+        t_id = data.split("=", 1)[1]
+        database.execute("DELETE FROM `earn_tasks` WHERE `id` = ?", (t_id,))
+        bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "🗑️ Vazifa o‘chirildi!"})
+        p_txt, p_kb = _build_admin_earn_panel()
+        edit(chat_id, message_id, p_txt, p_kb)
+        return
+
+    if data.startswith("adm_del_prm=") and chat_id == ADMIN:
+        p_id = data.split("=", 1)[1]
+        database.execute("DELETE FROM `promocodes` WHERE `id` = ?", (p_id,))
+        bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "🗑️ Promokod o‘chirildi!"})
+        p_txt, p_kb = _build_admin_earn_panel()
+        edit(chat_id, message_id, p_txt, p_kb)
+        return
+
+    if step == "adm_set_ref_price" and cid == ADMIN and text:
+        clean_v = text.strip().replace(" ", "")
+        if clean_v.replace(".", "", 1).isdigit():
+            database.execute("UPDATE `settings` SET `referal` = ? WHERE `id` = 1", (enc("encode", clean_v),))
+            unlink_file(f"user/{cid}.step")
+            sms(cid, f"✅ Referal mukofoti <b>{clean_v} so‘m</b> etib saqlandi!", PANEL_KB)
+        else:
+            sms(cid, "⚠️ Faqat raqam kiriting (masalan: 200):", AORT_KB)
+        return
+
+    if step == "adm_set_daily_amt" and cid == ADMIN and text:
+        clean_v = text.strip().replace(" ", "")
+        if clean_v.replace(".", "", 1).isdigit():
+            put_file("set/daily_bonus.txt", clean_v)
+            unlink_file(f"user/{cid}.step")
+            sms(cid, f"✅ Kunlik bonus miqdori <b>{clean_v} so‘m</b> etib saqlandi!", PANEL_KB)
+        else:
+            sms(cid, "⚠️ Faqat raqam kiriting (masalan: 100):", AORT_KB)
+        return
+
+    if step == "adm_set_bot_price" and cid == ADMIN and text:
+        clean_v = text.strip().replace(" ", "")
+        if clean_v.replace(".", "", 1).isdigit():
+            put_file("set/bot_price.txt", clean_v)
+            unlink_file(f"user/{cid}.step")
+            sms(cid, f"✅ Bo‘t kodi narxi <b>{fmt_money(clean_v)} so‘m</b> etib saqlandi!", PANEL_KB)
+        else:
+            sms(cid, "⚠️ Faqat raqam kiriting (masalan: 70000):", AORT_KB)
+        return
+
+    if step == "adm_set_earn_header" and cid == ADMIN and text:
+        put_file("set/earn_header.txt", text.strip())
+        unlink_file(f"user/{cid}.step")
+        sms(cid, "✅ Pul ishlash bo‘limi sarlavha matni yangilandi!", PANEL_KB)
+        return
+
+    if step == "adm_set_konkurs_txt" and cid == ADMIN and text:
+        put_file("set/konkurs_text.txt", text.strip())
+        unlink_file(f"user/{cid}.step")
+        sms(cid, "✅ Konkurs matni va sovrinlari saqlandi!", PANEL_KB)
+        return
+
+    if step == "adm_add_earn_ch" and cid == ADMIN and text:
+        parts = text.strip().split(None, 2)
+        if len(parts) >= 2 and parts[1].replace(".", "", 1).isdigit():
+            ch_u = parts[0].strip()
+            rew_v = parts[1].strip()
+            ch_title = parts[2].strip() if len(parts) >= 3 else ch_u
+            database.execute(
+                "INSERT INTO `earn_channels` (`channel_username`, `title`, `reward`, `status`) VALUES (?, ?, ?, 'on')",
+                (ch_u, ch_title, rew_v),
+            )
+            unlink_file(f"user/{cid}.step")
+            sms(cid, f"✅ Pullik obuna kanali (<b>{ch_u}</b> — +{rew_v} so‘m) qo‘shildi!", PANEL_KB)
+        else:
+            sms(cid, "⚠️ Format xato! Namuna: <code>@kanal_user 200 Kanal Nomi</code>", AORT_KB)
+        return
+
+    if step == "adm_add_earn_tsk" and cid == ADMIN and text:
+        lines = [ln.strip() for ln in text.strip().split("\n") if ln.strip()]
+        if len(lines) >= 4 and lines[3].replace(".", "", 1).isdigit():
+            v_mode = get_file("set/tmp_tsk_mode.txt").strip() or "auto"
+            database.execute(
+                "INSERT INTO `earn_tasks` (`title`, `description`, `url`, `reward`, `verify_type`, `status`) VALUES (?, ?, ?, ?, ?, 'on')",
+                (lines[0], lines[1], lines[2], lines[3], v_mode),
+            )
+            unlink_file(f"user/{cid}.step")
+            sms(cid, f"✅ Yangi vazifa («<b>{lines[0]}</b>» — +{lines[3]} so‘m) qo‘shildi!", PANEL_KB)
+        else:
+            sms(cid, "⚠️ Iltimos, ma'lumotlarni to‘liq 4 qatorda va 4-qatorda faqat raqam bilan yuboring!", AORT_KB)
+        return
+
+    if step == "adm_add_promo" and cid == ADMIN and text:
+        parts = text.strip().split()
+        if len(parts) >= 3 and parts[1].replace(".", "", 1).isdigit() and parts[2].isdigit():
+            p_code, p_rew, p_lim = parts[0], parts[1], int(parts[2])
+            database.execute(
+                "INSERT INTO `promocodes` (`code`, `reward`, `max_uses`, `used_count`, `status`) VALUES (?, ?, ?, 0, 'on')",
+                (p_code, p_rew, p_lim),
+            )
+            unlink_file(f"user/{cid}.step")
+            sms(cid, f"✅ Promokod <code>{p_code}</code> (+{p_rew} so‘m, {p_lim} ta limit) yaratildi!", PANEL_KB)
+        else:
+            sms(cid, "⚠️ Format xato! Namuna: <code>BONUS2026 500 50</code>", AORT_KB)
         return
 
     if text == "🛒 Buyurtmalar" and joinchat(cid):
@@ -3741,7 +4605,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         return
 
     if data == "tolovqldm":
-        sms(chat_id, "💳 To‘lov chekini fayli yoki rasmini yuboring \n\n⚠️ Agar chekni fayli yoki rasmi soxta bo'lsa botdan block olasiz!", ORT_KB)
+        sms(chat_id, "💳 To‘lov cheki yoki rasmini yuboring", ORT_KB)
         put_file(f"user/{chat_id}.step", "tolovqldm")
         return
 
@@ -3806,6 +4670,10 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
                 put_file("payments.txt", f"\n{checkid}", append=True)
                 sms(ADMIN, f"💳 Hisob to'ldirildi\n👤 Foydalanuvchi: {chat_id}\n💰 Summa: {plus} so'm")
         return
+
+    # ========================================================================
+    # FOYDALANUVCHI: Buyurtma berish oqimi
+    # ========================================================================
 
     if text == "➕ Buyurtma berish" and joinchat(cid):
         cats = database.fetch_all("SELECT * FROM `categorys`")
@@ -3964,7 +4832,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             else:
                 sms(cid, "⚠️ Havola noto‘g‘ri yuborilmoqda!\nQaytadan harakat qiling (masalan: https://t.me/... yoki @username):", ORDER_ORT_KB)
         else:
-            sms(cid, "❌ Yetarli mablag‘ mavjud emas\n\nHisobingizni to‘ldirib qayta urinib ko‘ring.", ORT_KB)
+            sms(cid, "❌ Yetarli mablag‘ mavjud emas\n\nHisobingizni to‘ldirib urinib ko‘ring.", ORT_KB)
         return
 
     if data == "cancelorder" and joinchat(chat_id):
@@ -4059,17 +4927,23 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
                 del_msg(chat_id, message_id)
         return
 
+
+
 def run_polling() -> None:
+    """Telegram botni TURBO Long-Polling rejimida (tayyor SSL + Worker Pool bilan) ishga tushiradi."""
     start_http_server_background(handle_update)
     if not API_KEY or API_KEY in ("TOKEN", "TOKEN_SHU_YERGA_YOZILADI"):
         print("⚠️ DIQQAT: BOT_TOKEN o'rnatilmagan! ushbu faylning 42-qatoriga BOT_TOKEN ni kiriting.")
         return
 
+    # 1. Tarmoq Keep-Alive havzasi va fon oqimlarini ishga tushiramiz
     start_network_workers()
 
+    # 2. Oldindan 6 ta doimiy ishchi oqim (Worker Pool) tayyorlab qo'yamiz
     for _ in range(8):
         threading.Thread(target=_update_worker_loop, daemon=True).start()
 
+    # 3. Webhookni o'chirib, bot ma'lumotini keshlaymiz
     bot("deleteWebhook")
     me_info = bot("getMe")
     if me_info.get("ok"):
@@ -4078,6 +4952,7 @@ def run_polling() -> None:
     else:
         print(f"❌ BOT_TOKEN xatoligi: {me_info}")
 
+    # 4. Cron oqimini fonda ishga tushiramiz
     threading.Thread(target=_cron_worker, daemon=True).start()
     print("🚀 Telegram bot MODULLI TURBO rejimda ishga tushdi! (Javob tezligi ~0.08s - 0.15s)")
 
@@ -4101,6 +4976,7 @@ def run_polling() -> None:
         except Exception as exc:
             print(f"Polling xatoligi: {exc}")
             time.sleep(1)
+
 
 if __name__ == "__main__":
     run_polling()
