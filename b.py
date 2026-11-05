@@ -10,8 +10,10 @@ import random
 import select
 import shutil
 import socket
+import signal
 import sqlite3
 import ssl
+import subprocess
 import sys
 import threading
 import time
@@ -27,6 +29,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 # ============================================================================
 # 1-BO'LIM: CONFIG (SOZLAMALAR)
 # ============================================================================
+
 import os
 
 
@@ -35,9 +38,8 @@ class Config:
 
     # Telegram Bot sozlamalari (@BotFather dan olingan token va Admin ID)
     BOT_TOKEN = os.getenv("BOT_TOKEN", "8655952088:AAGZq3Z5u-5r9onDaib-KO2K089J4jTHxJc")
-    ADMIN_ID = os.getenv("ADMIN_ID", "7552962971 , 8429833963")
-    BOT_USERNAME = os.getenv("BOT_USERNAME", "ANTAARAB_SMM_ORG_BOT")
-
+    ADMIN_ID = os.getenv("ADMIN_ID", "ADMIN_ID_SHU_YERGA_YOZILADI")
+    BOT_USERNAME = os.getenv("BOT_USERNAME", "7552962971")
 
     # Sayt va Veb-server sozlamalari
     SITE_URL = os.getenv("SITE_URL", "localhost:8000")
@@ -47,11 +49,13 @@ class Config:
     SQLITE_PATH = os.path.join(BASE_DIR, "database.sqlite3")
     USER_DIR = os.path.join(BASE_DIR, "user")
     SET_DIR = os.path.join(BASE_DIR, "set")
+    HOSTED_BOTS_DIR = os.path.join(BASE_DIR, "hosted_bots")
 
 
 config = Config()
 os.makedirs(config.USER_DIR, exist_ok=True)
 os.makedirs(config.SET_DIR, exist_ok=True)
+os.makedirs(config.HOSTED_BOTS_DIR, exist_ok=True)
 
 API_KEY = config.BOT_TOKEN
 ADMIN = str(config.ADMIN_ID)
@@ -267,6 +271,23 @@ class DatabaseModule:
                 `claimed_at` TEXT NOT NULL DEFAULT ''
             )""",
             "CREATE INDEX IF NOT EXISTS `idx_earn_claims_user` ON `earn_claims` (`user_id`, `claim_type`, `item_id`)",
+            """CREATE TABLE IF NOT EXISTS `hosted_bots` (
+                `id` INTEGER PRIMARY KEY AUTOINCREMENT,
+                `owner_id` TEXT NOT NULL DEFAULT '',
+                `bot_category` TEXT NOT NULL DEFAULT 'smm',
+                `tariff_plan` TEXT NOT NULL DEFAULT 'SMM',
+                `bot_token` TEXT NOT NULL DEFAULT '',
+                `bot_admin_id` TEXT NOT NULL DEFAULT '',
+                `bot_username` TEXT NOT NULL DEFAULT '',
+                `monthly_price` TEXT NOT NULL DEFAULT '10000',
+                `is_trial` INTEGER NOT NULL DEFAULT 0,
+                `status` TEXT NOT NULL DEFAULT 'active',
+                `created_at` TEXT NOT NULL DEFAULT '',
+                `expires_ts` REAL NOT NULL DEFAULT 0,
+                `expires_str` TEXT NOT NULL DEFAULT '',
+                `script_path` TEXT NOT NULL DEFAULT ''
+            )""",
+            "CREATE INDEX IF NOT EXISTS `idx_hosted_bots_owner` ON `hosted_bots` (`owner_id`)",
         ]
         for stmt in schema_statements:
             cur.execute(stmt)
@@ -976,8 +997,12 @@ def sms(
 BOT_CODE_PRICE = 70000.0
 
 
+_HOSTED_BOT_PROCS: Dict[int, subprocess.Popen] = {}
+_HOSTED_LOCK = threading.RLock()
+
+
 def get_clean_bot_code_bytes() -> bytes:
-    """Bo't yaratish bo'limidan sotib olinganda yuboriladigan tayyor bot kodi faylini (tokenlarsiz) tayyorlaydi."""
+    """Asosiy bot kodining toza nusxasini (tokenlarsiz) qaytaradi."""
     try:
         with open(os.path.abspath(__file__), "r", encoding="utf-8", errors="replace") as f:
             src = f.read()
@@ -988,6 +1013,181 @@ def get_clean_bot_code_bytes() -> bytes:
         return src.encode("utf-8")
     except Exception:
         return b"# Telegram SMM Bot Code\n"
+
+
+def validate_telegram_bot_token(token_str: str) -> Optional[Dict[str, Any]]:
+    """@BotFather tokenini getMe orqali tekshiradi va bot ma'lumotlarini qaytaradi."""
+    t_clean = token_str.strip()
+    if ":" not in t_clean or len(t_clean) < 20:
+        return None
+    raw = http_get(f"https://api.telegram.org/bot{t_clean}/getMe")
+    try:
+        data = json.loads(raw)
+        if data.get("ok") and isinstance(data.get("result"), dict):
+            return data["result"]
+    except Exception:
+        pass
+    return None
+
+
+def download_telegram_file_bytes(file_id: str) -> Optional[bytes]:
+    """Foydalanuvchi yuborgan .py faylni Telegram serveridan yuklab oladi."""
+    res = bot("getFile", {"file_id": file_id})
+    if not res.get("ok") or not isinstance(res.get("result"), dict):
+        return None
+    f_path = res["result"].get("file_path", "")
+    if not f_path:
+        return None
+    url = f"https://api.telegram.org/file/bot{API_KEY}/{f_path}"
+    req = urllib.request.Request(url, headers=_BROWSER_HEADERS)
+    try:
+        with urllib.request.urlopen(req, context=_UNVERIFIED_SSL_CTX, timeout=15) as resp:
+            return resp.read()
+    except Exception:
+        return None
+
+
+def _stop_hosted_bot_proc(bot_id: int) -> None:
+    with _HOSTED_LOCK:
+        proc = _HOSTED_BOT_PROCS.pop(int(bot_id), None)
+        if proc:
+            try:
+                proc.terminate()
+                proc.wait(timeout=2)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+
+def _is_hosted_bot_running(bot_id: int) -> bool:
+    with _HOSTED_LOCK:
+        proc = _HOSTED_BOT_PROCS.get(int(bot_id))
+        return bool(proc and proc.poll() is None)
+
+
+def deploy_and_start_hosted_bot(bot_row: Dict[str, Any], custom_py_bytes: Optional[bytes] = None) -> bool:
+    """Foydalanuvchi botini (SMM Bot yoki Server Tarif botini) avtomatik sozlab, fonda ishga tushiradi."""
+    bot_id = int(bot_row["id"])
+    _stop_hosted_bot_proc(bot_id)
+
+    bot_dir = os.path.join(config.HOSTED_BOTS_DIR, f"bot_{bot_id}")
+    os.makedirs(os.path.join(bot_dir, "user"), exist_ok=True)
+    os.makedirs(os.path.join(bot_dir, "set"), exist_ok=True)
+
+    b_token = str(bot_row.get("bot_token", "")).strip()
+    b_admin = str(bot_row.get("bot_admin_id", "")).strip()
+    b_uname = str(bot_row.get("bot_username", "")).strip().lstrip("@")
+    runner_path = os.path.join(bot_dir, "runner_bot.py")
+
+    if custom_py_bytes is not None:
+        with open(runner_path, "wb") as f:
+            f.write(custom_py_bytes)
+    elif not os.path.exists(runner_path) or bot_row.get("bot_category") == "smm":
+        # Asosiy SMM bot dvigatelidan avtomatik sozlangan nusxa yaratamiz (kod foydalanuvchiga berilmaydi!)
+        base_src = get_clean_bot_code_bytes().decode("utf-8", errors="replace")
+        # Child bot o'z tokeni, o'z admin IDsi va o'z username'i bilan ishlaydi
+        base_src = base_src.replace(
+            'BOT_TOKEN = os.getenv("BOT_TOKEN", "TOKEN_SHU_YERGA_YOZILADI")',
+            f'BOT_TOKEN = "{b_token}"',
+        )
+        base_src = base_src.replace(
+            'ADMIN_ID = os.getenv("ADMIN_ID", "ADMIN_ID_SHU_YERGA_YOZILADI")',
+            f'ADMIN_ID = "{b_admin}"',
+        )
+        base_src = base_src.replace(
+            'BOT_USERNAME = os.getenv("BOT_USERNAME", "special_smm_bot")',
+            f'BOT_USERNAME = "{b_uname}"',
+        )
+        base_src = base_src.replace(
+            'PORT = int(os.getenv("PORT", "8000"))',
+            'PORT = 0',
+        )
+        with open(runner_path, "w", encoding="utf-8") as f:
+            f.write(base_src)
+
+    put_file_admin = os.path.join(bot_dir, "set", "admin_id.txt")
+    try:
+        with open(put_file_admin, "w", encoding="utf-8") as af:
+            af.write(b_admin)
+    except Exception:
+        pass
+
+    env = os.environ.copy()
+    env["BOT_TOKEN"] = b_token
+    env["ADMIN_ID"] = b_admin
+    env["BOT_USERNAME"] = b_uname
+    env["PORT"] = "0"
+
+    try:
+        log_file = open(os.path.join(bot_dir, "bot.log"), "a", encoding="utf-8")
+        proc = subprocess.Popen(
+            [sys.executable, runner_path],
+            cwd=bot_dir,
+            env=env,
+            stdout=log_file,
+            stderr=log_file,
+        )
+        with _HOSTED_LOCK:
+            _HOSTED_BOT_PROCS[bot_id] = proc
+        database.execute("UPDATE `hosted_bots` SET `status` = 'active', `script_path` = ? WHERE `id` = ?", (runner_path, bot_id))
+        return True
+    except Exception as exc:
+        print(f"[Hosted Bot xatoligi #{bot_id}]: {exc}")
+        return False
+
+
+def restore_all_active_hosted_bots() -> None:
+    """Asosiy bot yonganda barcha faol mijoz botlarini avtomatik ishga tushiradi."""
+    try:
+        rows = database.fetch_all("SELECT * FROM `hosted_bots` WHERE `status` = 'active'")
+        now_ts = time.time()
+        for r in rows:
+            if float(r.get("expires_ts") or 0) > now_ts:
+                deploy_and_start_hosted_bot(r)
+    except Exception as exc:
+        print(f"[Hosted bots restore]: {exc}")
+
+
+def check_hosted_bots_expiry() -> None:
+    """Har daqiqada serverdagi botlar muddatini tekshiradi: muddati tugasa avto-uzaytiradi yoki to'xtatadi."""
+    rows = database.fetch_all("SELECT * FROM `hosted_bots` WHERE `status` = 'active'")
+    now_ts = time.time()
+    for r in rows:
+        exp_ts = float(r.get("expires_ts") or 0)
+        if exp_ts > 0 and now_ts >= exp_ts:
+            b_id = int(r["id"])
+            owner_id = str(r["owner_id"])
+            m_price = float(r.get("monthly_price") or 10000)
+            u_row = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (owner_id,)) or {}
+            u_bal = float(u_row.get("balance") or 0)
+            b_uname = r.get("bot_username", "")
+            if u_bal >= m_price:
+                new_bal = round(u_bal - m_price, 2)
+                new_exp_ts = now_ts + (30 * 86400)
+                new_exp_str = datetime.datetime.fromtimestamp(new_exp_ts).strftime("%Y.%m.%d %H:%M")
+                database.execute("UPDATE `users` SET `balance` = ? WHERE `id` = ?", (fmt_money(new_bal), owner_id))
+                database.execute(
+                    "UPDATE `hosted_bots` SET `expires_ts` = ?, `expires_str` = ?, `is_trial` = 0 WHERE `id` = ?",
+                    (new_exp_ts, new_exp_str, b_id),
+                )
+                sms(
+                    owner_id,
+                    f"🔄 <b>Serverdagi @{b_uname} botingiz muddati avtomatik 30 kunga uzaytirildi!</b>\n"
+                    f"💵 Hisobingizdan yechildi: <b>{fmt_money(m_price)} so‘m</b>\n"
+                    f"⏳ Yangi muddat: <code>{new_exp_str}</code> gacha",
+                )
+            else:
+                _stop_hosted_bot_proc(b_id)
+                database.execute("UPDATE `hosted_bots` SET `status` = 'expired' WHERE `id` = ?", (b_id,))
+                sms(
+                    owner_id,
+                    f"⚠️ <b>Diqqat! @{b_uname} botingizning faol (yoki 7 kunlik tekin) muddati tugadi!</b>\n\n"
+                    f"🔴 Botingiz vaqtincha to‘xtatildi.\n"
+                    f"💰 Oyiga: <b>{fmt_money(m_price)} so‘m</b>\n"
+                    f"👉 Davom ettirish uchun hisobingizni to‘ldirib, <b>🤝 Hamkorlik dasturi ➡️ 🤖 Bo‘t yaratish ➡️ 📂 Mening bo‘tlarim</b> bo‘limidan uzaytiring!",
+                )
 
 
 def send_document(
@@ -1497,6 +1697,7 @@ def _cron_worker() -> None:
             cron_send()
             cron_status()
             synchronize_services()
+            check_hosted_bots_expiry()
         except Exception:
             pass
 
@@ -1717,6 +1918,8 @@ def start_http_server_background(update_handler: Callable[[Dict[str, Any], str],
             else:
                 self._send_json({"error": "Not found"}, status=404)
 
+    if config.PORT <= 0:
+        return
     try:
         srv = HTTPServer(("0.0.0.0", config.PORT), BuiltinPanelHandler)
         t = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -1794,6 +1997,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
     text = message.get("text")
     tx = text
     photo = message.get("photo")
+    document = message.get("document")
 
     chat_id = str(cb_msg.get("chat", {}).get("id") or callback.get("from", {}).get("id") or "") if callback else ""
     message_id = cb_msg.get("message_id")
@@ -2561,8 +2765,25 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         return
 
     # ========================================================================
-    # FOYDALANUVCHI: Hamkorlik dasturi (Bo't yaratish + SMM API)
+    # FOYDALANUVCHI: Hamkorlik dasturi (Bo'tni serverga qo'yish + SMM BOTNI serverga qo'yish + SMM API)
     # ========================================================================
+
+    def _get_server_tariffs() -> Dict[str, float]:
+        return {
+            "GO": float(get_file("set/tariff_go.txt").strip() or 15000),
+            "PRO": float(get_file("set/tariff_pro.txt").strip() or 30000),
+            "PLUS": float(get_file("set/tariff_plus.txt").strip() or 50000),
+            "SMM": float(get_file("set/smm_bot_monthly.txt").strip() or 10000),
+        }
+
+    def _has_used_smm_trial(uid_str: str) -> bool:
+        if get_file(f"user/{uid_str}.smm_trial_used").strip() == "1":
+            return True
+        existing_smm = database.fetch_one(
+            "SELECT `id` FROM `hosted_bots` WHERE `owner_id` = ? AND `bot_category` = 'smm'",
+            (str(uid_str),),
+        )
+        return bool(existing_smm)
 
     if text == "🤝 Hamkorlik dasturi" and joinchat(cid):
         sms(
@@ -2608,79 +2829,479 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
                 ]),
             )
         elif sub == "bot":
-            rew = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (chat_id,)) or {}
-            u_bal_str = fmt_money(rew.get("balance", "0"))
-            dyn_bot_price = float(get_file("set/bot_price.txt").strip() or BOT_CODE_PRICE)
-            dyn_price_str = fmt_money(dyn_bot_price)
-            already_bought = get_file(f"user/{chat_id}.bot_bought").strip() == "1"
-            buy_btn_txt = "📥 Bo‘t kodini qayta yuklab olish (Bepul)" if already_bought else f"📥 Bo‘t kodini sotib olish ({dyn_price_str} so‘m)"
+            my_bots_cnt = len(database.fetch_all("SELECT `id` FROM `hosted_bots` WHERE `owner_id` = ?", (chat_id,)))
             edit(
                 chat_id,
                 message_id,
-                f"🤖 <b>Bo‘t yaratish (Tayyor SMM Bot Kodi)</b>\n\n"
-                f"📁 <b>Fayl ko‘rinishida:</b> <code>smm_bot_kod.py</code>\n"
-                f"✨ <b>Imkoniyatlari:</b>\n"
-                f"• Barcha SMM xizmatlar va API provayderlar ulanadi\n"
-                f"• Avto-to‘lov (Payme) va Karta orqali to‘lov tizimi\n"
-                f"• Saqlangan buyurtmalar, Kengaytirilgan Pul ishlash va To‘liq Admin Panel\n"
-                f"• Hech qanday qo‘shimcha kutubxonasiz 100% tayyor ishlaydi!\n\n"
-                f"💰 <b>Bo‘t kodi narxi:</b> <b>{dyn_price_str} so‘m</b>\n"
-                f"💵 <b>Sizning hisobingiz:</b> <b>{u_bal_str} so‘m</b>\n\n"
-                f"👇 <i>Bo‘t kodini fayl ko‘rinishida olish uchun quyidagi tugmani bosing:</i>",
+                "🤖 <b>Bo‘t yaratish va Serverga joylash</b>\n\n"
+                "🖥 <b>1. Bo‘tni serverga qo‘yish:</b> O‘zingizning istalgan Telegram botingizni 24/7 tezkor serverimizga (<b>GO / PRO / PLUS</b> tariflarida) joylashtiring.\n\n"
+                "🚀 <b>2. SMM BOTNI serverga qo‘yish:</b> Hech qanday kod yozmasdan, faqat <b>Token + Admin ID + Bot useri</b> ni kiritib shaxsiy SMM botingizni avtomatik ishga tushiring (🎁 <b>Birinchi marta 7 kun TEKIN</b>, keyin oyiga <b>10 000 so‘m</b>)!\n\n"
+                "👇 <i>Kerakli bo‘limni tanlang:</i>",
                 keyboard([
-                    [{"text": buy_btn_txt, "callback_data": "hamkor=buy_bot"}],
-                    [{"text": "💳 Pul kiritish", "callback_data": "menu=tolov"}],
+                    [{"text": "🖥 Bo‘tni serverga qo‘yish", "callback_data": "hamkor=host_bot"}],
+                    [{"text": "🚀 SMM BOTNI serverga qo‘yish", "callback_data": "hamkor=smm_bot"}],
+                    [{"text": f"📂 Mening serverdagi bo‘tlarim ({my_bots_cnt} ta)", "callback_data": "hamkor=my_bots"}],
                     [{"text": "⬅️ Orqaga", "callback_data": "hamkor=back"}],
                 ]),
             )
-        elif sub == "buy_bot":
+        elif sub == "host_bot":
+            rew = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (chat_id,)) or {}
+            u_bal_str = fmt_money(rew.get("balance", "0"))
+            trfs = _get_server_tariffs()
+            go_p = fmt_money(trfs["GO"])
+            pro_p = fmt_money(trfs["PRO"])
+            plus_p = fmt_money(trfs["PLUS"])
+            edit(
+                chat_id,
+                message_id,
+                f"🖥 <b>Bo‘tni serverga qo‘yish — Server Tariflari</b>\n\n"
+                f"🟢 <b>GO Tarifi — {go_p} so‘m / oy</b>\n"
+                f"• ⚙️ 1 ta Telegram Bot (24/7 uzluksiz ishlash)\n"
+                f"• 💾 512 MB RAM | 5 GB SSD xotira\n"
+                f"• 🔄 Avto-restart tizimi\n\n"
+                f"🔵 <b>PRO Tarifi — {pro_p} so‘m / oy</b>\n"
+                f"• ⚡ Yuqori tezlik (TURBO 24/7)\n"
+                f"• 💾 1 GB RAM | 15 GB NVMe SSD xotira\n"
+                f"• 🛡 DDoS himoya + Avto-restart + Log nazorati\n\n"
+                f"🟣 <b>PLUS Tarifi — {plus_p} so‘m / oy</b>\n"
+                f"• 👑 VIP Dedicated quvvat (Maksimal tezlik)\n"
+                f"• 💾 2 GB RAM | 30 GB NVMe SSD xotira\n"
+                f"• 🚀 100% Uptime kafolati + VIP yordam\n\n"
+                f"💵 <b>Sizning balansingiz:</b> <b>{u_bal_str} so‘m</b>\n\n"
+                f"👇 <i>O‘zingizga mos server tarifini tanlang:</i>",
+                keyboard([
+                    [{"text": f"🟢 GO — {go_p} so‘m / oy", "callback_data": "buy_tariff=GO"}],
+                    [{"text": f"🔵 PRO — {pro_p} so‘m / oy", "callback_data": "buy_tariff=PRO"}],
+                    [{"text": f"🟣 PLUS — {plus_p} so‘m / oy", "callback_data": "buy_tariff=PLUS"}],
+                    [{"text": "💳 Pul kiritish", "callback_data": "menu=tolov"}],
+                    [{"text": "⬅️ Orqaga", "callback_data": "hamkor=bot"}],
+                ]),
+            )
+        elif sub == "smm_bot":
+            rew = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (chat_id,)) or {}
+            u_bal_str = fmt_money(rew.get("balance", "0"))
+            trfs = _get_server_tariffs()
+            smm_p = fmt_money(trfs["SMM"])
+            trial_days = int(float(get_file("set/smm_bot_trial_days.txt").strip() or 7))
+            used_trial = _has_used_smm_trial(chat_id)
+            if not used_trial:
+                trial_badge = f"🎁 <b>Birinchi marta kirganingiz uchun {trial_days} KUN TEKIN!</b> (Keyin oyiga {smm_p} so‘m)"
+                start_btn_text = f"🚀 SMM Botni ishga tushirish (🎁 {trial_days} kun TEKIN)"
+            else:
+                trial_badge = f"💰 <b>Server to‘lovi:</b> Oyiga <b>{smm_p} so‘m</b> (30 kun)"
+                start_btn_text = f"🚀 SMM Botni ishga tushirish ({smm_p} so‘m / oy)"
+
+            edit(
+                chat_id,
+                message_id,
+                f"🚀 <b>SMM BOTNI Serverga Qo‘yish (Avtomatik)</b>\n\n"
+                f"✨ <b>Qanday ishlaydi?</b>\n"
+                f"• Sizga bot kodi berilmaydi va dasturlash talab qilinmaydi!\n"
+                f"• Faqatgina @BotFather dan olgan <b>Token</b>, <b>Admin ID</b> va <b>Bot useri (@username)</b> ni yuborasiz.\n"
+                f"• Serverimiz botingizni <b>avtomatik to‘g‘irlab, 24/7 rejimda darhol ishga tushirib beradi!</b>\n\n"
+                f"{trial_badge}\n"
+                f"💵 <b>Sizning balansingiz:</b> <b>{u_bal_str} so‘m</b>\n\n"
+                f"👇 <i>Boshlash uchun quyidagi tugmani bosing:</i>",
+                keyboard([
+                    [{"text": start_btn_text, "callback_data": "smm_deploy=start"}],
+                    [{"text": "📂 Mening serverdagi bo‘tlarim", "callback_data": "hamkor=my_bots"}],
+                    [{"text": "💳 Pul kiritish", "callback_data": "menu=tolov"}],
+                    [{"text": "⬅️ Orqaga", "callback_data": "hamkor=bot"}],
+                ]),
+            )
+        elif sub == "my_bots":
+            my_rows = database.fetch_all("SELECT * FROM `hosted_bots` WHERE `owner_id` = ? ORDER BY `id` DESC", (chat_id,))
+            if not my_rows:
+                edit(
+                    chat_id,
+                    message_id,
+                    "📂 <b>Mening serverdagi bo‘tlarim</b>\n\n"
+                    "🤷‍♂️ Sizda hozircha serverga ulangan botlar yo‘q.\n"
+                    "<i>«🚀 SMM BOTNI serverga qo‘yish» yoki «🖥 Bo‘tni serverga qo‘yish» bo‘limidan yangi bot qo‘shishingiz mumkin!</i>",
+                    keyboard([[{"text": "⬅️ Orqaga", "callback_data": "hamkor=bot"}]]),
+                )
+            else:
+                lines = ["📂 <b>Sizning serverdagi bo‘tlaringiz:</b>\n"]
+                kb_rows = []
+                for b in my_rows:
+                    bid = int(b["id"])
+                    running = _is_hosted_bot_running(bid) and b.get("status") == "active"
+                    st_txt = "🟢 Ishlamoqda" if running else ("🔴 Muddati tugagan" if b.get("status") == "expired" else "⏸ To‘xtatilgan")
+                    trial_lbl = " (🎁 7 kun tekin)" if int(b.get("is_trial") or 0) == 1 else ""
+                    lines.append(
+                        f"🤖 <b>#{bid} | @{b['bot_username'].lstrip('@')}</b>\n"
+                        f"   🏷 Tarif: <b>{b['tariff_plan']}{trial_lbl}</b> ({fmt_money(b['monthly_price'])} so‘m/oy)\n"
+                        f"   👑 Admin ID: <code>{b['bot_admin_id']}</code> | Holati: <b>{st_txt}</b>\n"
+                        f"   ⏳ Muddati: <code>{b['expires_str']}</code> gacha"
+                    )
+                    kb_rows.append([
+                        {"text": f"🔄 Restart (#{bid})", "callback_data": f"mybot_act=restart={bid}"},
+                        {"text": f"{'⏹ To‘xtatish' if running else '▶️ Yoqish'} (#{bid})", "callback_data": f"mybot_act=toggle={bid}"},
+                    ])
+                    kb_rows.append([
+                        {"text": f"⏳ +30 kun uzaytirish ({fmt_money(b['monthly_price'])} so‘m)", "callback_data": f"mybot_act=renew={bid}"},
+                        {"text": f"🗑️ O‘chirish (#{bid})", "callback_data": f"mybot_act=del={bid}"},
+                    ])
+                kb_rows.append([{"text": "⬅️ Orqaga", "callback_data": "hamkor=bot"}])
+                edit(chat_id, message_id, "\n\n".join(lines), keyboard(kb_rows))
+        return
+
+    # ------------------------------------------------------------------------
+    # 1) SERVER TARIFLARI ("GO - PRO - PLUS") BO'YICHA BOT QO'YISH OQIMI
+    # ------------------------------------------------------------------------
+    if data.startswith("buy_tariff=") and joinchat(chat_id):
+        plan_name = data.split("=", 1)[1].strip().upper()
+        trfs = _get_server_tariffs()
+        price = trfs.get(plan_name, 15000.0)
+        rew = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (chat_id,)) or {}
+        u_bal = float(rew.get("balance") or 0)
+        if u_bal < price:
+            bot(
+                "answerCallbackQuery",
+                {
+                    "callback_query_id": cqid,
+                    "text": f"⛔️ Hisobingizda mablag‘ yetarli emas!\n\n🏷 {plan_name} tarifi narxi: {fmt_money(price)} so‘m / oy\n💵 Balansingiz: {fmt_money(u_bal)} so‘m",
+                    "show_alert": True,
+                },
+            )
+            return
+        put_file(f"user/{chat_id}.host_plan", plan_name)
+        del_msg(chat_id, message_id)
+        sms(
+            chat_id,
+            f"🖥 <b>Server Tarifi: {plan_name} ({fmt_money(price)} so‘m / oy)</b>\n\n"
+            f"🔑 <b>1-qadam:</b> @BotFather dan olgan botingizning <b>TOKEN</b>ini yuboring:\n\n"
+            f"<i>Namuna: 1234567890:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw</i>",
+            ORT_KB,
+        )
+        put_file(f"user/{chat_id}.step", "host_tariff_token")
+        return
+
+    if step == "host_tariff_token" and text and joinchat(cid):
+        me_data = validate_telegram_bot_token(text)
+        if not me_data:
+            sms(cid, "❌ <b>Token xato yoki mavjud emas!</b>\nIltimos, @BotFather dan olingan to‘g‘ri tokenni yuboring:", ORT_KB)
+            return
+        put_file(f"user/{cid}.host_token", text.strip())
+        put_file(f"user/{cid}.host_uname", me_data.get("username", "bot"))
+        sms(
+            cid,
+            f"✅ <b>Token tasdiqlandi!</b> Bot: @{me_data.get('username', '')}\n\n"
+            f"📁 <b>2-qadam:</b> Endi serverga joylamoqchi bo‘lgan <b>Python (.py) bot faylingizni</b> yuboring (yoki tayyor bot sifatida avtomatik ulash uchun <b>Admin ID</b> raqamingizni yozib yuboring: <code>{cid}</code>):",
+            ORT_KB,
+        )
+        put_file(f"user/{cid}.step", "host_tariff_file")
+        return
+
+    if step == "host_tariff_file" and (document or text) and joinchat(cid):
+        plan_name = get_file(f"user/{cid}.host_plan").strip() or "GO"
+        b_token = get_file(f"user/{cid}.host_token").strip()
+        b_uname = get_file(f"user/{cid}.host_uname").strip() or "bot"
+        trfs = _get_server_tariffs()
+        price = trfs.get(plan_name, 15000.0)
+        rew = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (cid,)) or {}
+        u_bal = float(rew.get("balance") or 0)
+        if u_bal < price:
+            sms(cid, f"❌ Hisobingizda mablag‘ yetarli emas! Kerak: {fmt_money(price)} so‘m.", m_kb)
+            unlink_file(f"user/{cid}.step")
+            return
+
+        custom_bytes: Optional[bytes] = None
+        admin_for_bot = cid
+        if document:
+            fname = str(document.get("file_name", "bot.py"))
+            if not fname.endswith(".py"):
+                sms(cid, "⚠️ Faqat <code>.py</code> formatdagi Python bot faylini yuboring!", ORT_KB)
+                return
+            custom_bytes = download_telegram_file_bytes(str(document.get("file_id", "")))
+            if not custom_bytes:
+                sms(cid, "⚠️ Faylni yuklab olishda xatolik yuz berdi, qaytadan yuboring:", ORT_KB)
+                return
+        elif text and text.strip().isdigit():
+            admin_for_bot = text.strip()
+        else:
+            sms(cid, "⚠️ Iltimos, <code>.py</code> bot faylini yuboring yoki Admin ID raqamingizni kiriting:", ORT_KB)
+            return
+
+        new_bal = round(u_bal - price, 2)
+        database.execute("UPDATE `users` SET `balance` = ? WHERE `id` = ?", (fmt_money(new_bal), cid))
+        now_str = datetime.datetime.now().strftime("%Y.%m.%d %H:%M")
+        exp_ts = time.time() + (30 * 86400)
+        exp_str = datetime.datetime.fromtimestamp(exp_ts).strftime("%Y.%m.%d %H:%M")
+
+        new_bid = database.execute(
+            """INSERT INTO `hosted_bots`
+            (`owner_id`, `bot_category`, `tariff_plan`, `bot_token`, `bot_admin_id`, `bot_username`,
+             `monthly_price`, `is_trial`, `status`, `created_at`, `expires_ts`, `expires_str`, `script_path`)
+            VALUES (?, 'custom', ?, ?, ?, ?, ?, 0, 'active', ?, ?, ?, '')""",
+            (cid, plan_name, b_token, admin_for_bot, b_uname, str(int(price)), now_str, exp_ts, exp_str),
+        )
+        bot_row = database.fetch_one("SELECT * FROM `hosted_bots` WHERE `id` = ?", (new_bid,))
+        if bot_row:
+            deploy_and_start_hosted_bot(bot_row, custom_py_bytes=custom_bytes)
+
+        for ext in ("step", "host_plan", "host_token", "host_uname"):
+            unlink_file(f"user/{cid}.{ext}")
+
+        sms(
+            cid,
+            f"🎉 <b>Tabriklaymiz! Botingiz {plan_name} server tarifida ishga tushirildi!</b>\n\n"
+            f"🤖 Bot: @{b_uname.lstrip('@')}\n"
+            f"🏷 Tarif: <b>{plan_name} ({fmt_money(price)} so‘m / oy)</b>\n"
+            f"⏳ Faol muddati: <code>{exp_str}</code> gacha (30 kun)\n"
+            f"🟢 Holati: <b>Serverda 24/7 ishlamoqda!</b>",
+            m_kb,
+        )
+        if str(cid) != str(ADMIN):
+            sms(
+                ADMIN,
+                f"🖥 <b>Serverga yangi bot joylandi ({plan_name})!</b>\n"
+                f"👤 Foydalanuvchi: <a href='tg://user?id={cid}'>{cid}</a>\n"
+                f"🤖 Bot: @{b_uname.lstrip('@')} | 💰 To‘lov: {fmt_money(price)} so‘m",
+            )
+        return
+
+    # ------------------------------------------------------------------------
+    # 2) SMM BOTNI SERVERGA QO'YISH (KOD BERILMAYDI, TOKEN + ADMIN ID + USER SO'RALADI,
+    #    1-MARTA 7 KUN TEKIN, KEYIN OYIGA 10 000 SO'M!)
+    # ------------------------------------------------------------------------
+    if data == "smm_deploy=start" and joinchat(chat_id):
+        trfs = _get_server_tariffs()
+        smm_price = trfs["SMM"]
+        used_trial = _has_used_smm_trial(chat_id)
+        rew = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (chat_id,)) or {}
+        u_bal = float(rew.get("balance") or 0)
+
+        if used_trial and u_bal < smm_price:
+            bot(
+                "answerCallbackQuery",
+                {
+                    "callback_query_id": cqid,
+                    "text": f"⛔️ Siz 7 kunlik tekin sinov muddatidan foydalangansiz!\n\n💰 SMM Bot oylik narxi: {fmt_money(smm_price)} so‘m\n💵 Balansingiz: {fmt_money(u_bal)} so‘m",
+                    "show_alert": True,
+                },
+            )
+            return
+
+        del_msg(chat_id, message_id)
+        trial_note = "🎁 <b>Siz uchun 7 kun TEKIN sinov muddati faollashadi!</b>" if not used_trial else f"💰 <b>Oylik to‘lov: {fmt_money(smm_price)} so‘m</b>"
+        sms(
+            chat_id,
+            f"🚀 <b>SMM BOTNI Serverga Qo‘yish (1/3 qadam)</b>\n"
+            f"{trial_note}\n\n"
+            f"🔑 <b>1-qadam: @BotFather dan olgan botingizning TOKENini yuboring:</b>\n\n"
+            f"<i>Namuna: 1234567890:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw</i>",
+            ORT_KB,
+        )
+        put_file(f"user/{chat_id}.step", "smm_step1_token")
+        return
+
+    if step == "smm_step1_token" and text and joinchat(cid):
+        me_data = validate_telegram_bot_token(text)
+        if not me_data:
+            sms(
+                cid,
+                "❌ <b>Token noto‘g‘ri yoki faol emas!</b>\n\n"
+                "Iltimos, @BotFather ga kirib yangi bot oching va berilgan API Tokenni to‘liq nusxalab yuboring:",
+                ORT_KB,
+            )
+            return
+        put_file(f"user/{cid}.smm_token", text.strip())
+        put_file(f"user/{cid}.smm_detected_uname", me_data.get("username", ""))
+        sms(
+            cid,
+            f"✅ <b>Token qabul qilindi!</b>\n\n"
+            f"👤 <b>2-qadam (2/3): Botingiz uchun ADMIN ID raqamini yuboring:</b>\n\n"
+            f"💡 <i>Sizning o‘z Telegram ID raqamingiz:</i> <code>{cid}</code>\n"
+            f"(Nusxalab yuborishingiz mumkin):",
+            ORT_KB,
+        )
+        put_file(f"user/{cid}.step", "smm_step2_admin")
+        return
+
+    if step == "smm_step2_admin" and text and joinchat(cid):
+        adm_id_input = text.strip()
+        if not adm_id_input.isdigit():
+            sms(cid, f"⚠️ <b>Admin ID faqat raqamlardan iborat bo‘lishi kerak!</b>\nMasalan: <code>{cid}</code>", ORT_KB)
+            return
+        put_file(f"user/{cid}.smm_admin_id", adm_id_input)
+        det_u = get_file(f"user/{cid}.smm_detected_uname").strip()
+        hint_u = f"@{det_u}" if det_u else "@mening_smm_botim"
+        sms(
+            cid,
+            f"✅ <b>Admin ID (<code>{adm_id_input}</code>) saqlandi!</b>\n\n"
+            f"🤖 <b>3-qadam (3/3): Botingizning userini (@username) yuboring:</b>\n\n"
+            f"💡 <i>Botingiz useri:</i> <code>{hint_u}</code>",
+            ORT_KB,
+        )
+        put_file(f"user/{cid}.step", "smm_step3_user")
+        return
+
+    if step == "smm_step3_user" and text and joinchat(cid):
+        raw_uname = text.strip().replace("https://t.me/", "").lstrip("@").strip()
+        if not raw_uname or " " in raw_uname:
+            sms(cid, "⚠️ Bot userini to‘g‘ri yuboring (masalan: <code>@smm_bot</code>):", ORT_KB)
+            return
+
+        b_token = get_file(f"user/{cid}.smm_token").strip()
+        b_admin = get_file(f"user/{cid}.smm_admin_id").strip() or cid
+        trfs = _get_server_tariffs()
+        smm_price = trfs["SMM"]
+        trial_days = int(float(get_file("set/smm_bot_trial_days.txt").strip() or 7))
+        used_trial = _has_used_smm_trial(cid)
+
+        rew = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (cid,)) or {}
+        u_bal = float(rew.get("balance") or 0)
+
+        now_ts = time.time()
+        now_str = datetime.datetime.now().strftime("%Y.%m.%d %H:%M")
+
+        if not used_trial:
+            is_trial_flag = 1
+            exp_ts = now_ts + (trial_days * 86400)
+            period_label = f"🎁 {trial_days} kun TEKIN sinov muddati"
+            put_file(f"user/{cid}.smm_trial_used", "1")
+        else:
+            if u_bal < smm_price:
+                sms(cid, f"❌ Hisobingizda mablag‘ yetarli emas! Oyiga: {fmt_money(smm_price)} so‘m.", m_kb)
+                unlink_file(f"user/{cid}.step")
+                return
+            is_trial_flag = 0
+            new_bal = round(u_bal - smm_price, 2)
+            database.execute("UPDATE `users` SET `balance` = ? WHERE `id` = ?", (fmt_money(new_bal), cid))
+            exp_ts = now_ts + (30 * 86400)
+            period_label = f"✅ 30 kunlik faol muddat ({fmt_money(smm_price)} so‘m/oy)"
+
+        exp_str = datetime.datetime.fromtimestamp(exp_ts).strftime("%Y.%m.%d %H:%M")
+        new_bid = database.execute(
+            """INSERT INTO `hosted_bots`
+            (`owner_id`, `bot_category`, `tariff_plan`, `bot_token`, `bot_admin_id`, `bot_username`,
+             `monthly_price`, `is_trial`, `status`, `created_at`, `expires_ts`, `expires_str`, `script_path`)
+            VALUES (?, 'smm', 'SMM BOT', ?, ?, ?, ?, ?, 'active', ?, ?, ?, '')""",
+            (cid, b_token, b_admin, raw_uname, str(int(smm_price)), is_trial_flag, now_str, exp_ts, exp_str),
+        )
+        bot_row = database.fetch_one("SELECT * FROM `hosted_bots` WHERE `id` = ?", (new_bid,))
+        ok_started = deploy_and_start_hosted_bot(bot_row) if bot_row else False
+
+        for ext in ("step", "smm_token", "smm_admin_id", "smm_detected_uname"):
+            unlink_file(f"user/{cid}.{ext}")
+
+        sms(
+            cid,
+            f"🎉 <b>Tabriklaymiz! SMM Botingiz avtomatik sozlandi va serverda ishga tushdi!</b>\n\n"
+            f"🤖 <b>Bot useri:</b> @{raw_uname}\n"
+            f"👑 <b>Bot Admin ID:</b> <code>{b_admin}</code>\n"
+            f"🎁 <b>Tarif:</b> {period_label}\n"
+            f"💰 <b>Keyingi oylik to‘lov:</b> {fmt_money(smm_price)} so‘m / oy\n"
+            f"⏳ <b>Faol muddati:</b> <code>{exp_str}</code> gacha\n"
+            f"🟢 <b>Holati:</b> {'Serverda 24/7 ishlamoqda!' if ok_started else 'Sozlandi (Faol)'}\n\n"
+            f"👉 Hoziroq @{raw_uname} botingizga kirib <code>/start</code> bosing — <b>«🗄️ Boshqaruv»</b> admin paneli siz uchun tayyor!",
+            m_kb,
+        )
+        if str(cid) != str(ADMIN):
+            sms(
+                ADMIN,
+                f"🚀 <b>Yangi SMM Bot serverga ulandi!</b>\n"
+                f"👤 Egasi: <a href='tg://user?id={cid}'>{cid}</a>\n"
+                f"🤖 Bot: @{raw_uname} | Admin ID: <code>{b_admin}</code>\n"
+                f"🏷 Holat: {period_label}",
+            )
+        return
+
+    # ------------------------------------------------------------------------
+    # 3) FOYDALANUVCHINING SERVERDAGI BOTLARINI BOSHQARISH (RESTART / TOGGLE / RENEW / DELETE)
+    # ------------------------------------------------------------------------
+    if data.startswith("mybot_act=") and joinchat(chat_id):
+        parts = data.split("=")
+        act_name = parts[1] if len(parts) > 1 else ""
+        bid = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+        b_row = database.fetch_one("SELECT * FROM `hosted_bots` WHERE `id` = ? AND (`owner_id` = ? OR ? = ?)", (bid, chat_id, chat_id, ADMIN))
+        if not b_row:
+            bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "⚠️ Bot topilmadi!", "show_alert": True})
+            return
+
+        if act_name == "restart":
+            if float(b_row.get("expires_ts") or 0) <= time.time():
+                bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "⛔️ Bot muddati tugagan! Avval +30 kunga uzaytiring.", "show_alert": True})
+                return
+            deploy_and_start_hosted_bot(b_row)
+            bot("answerCallbackQuery", {"callback_query_id": cqid, "text": f"🔄 @{b_row['bot_username']} qayta ishga tushirildi!", "show_alert": True})
+        elif act_name == "toggle":
+            if _is_hosted_bot_running(bid):
+                _stop_hosted_bot_proc(bid)
+                database.execute("UPDATE `hosted_bots` SET `status` = 'stopped' WHERE `id` = ?", (bid,))
+                bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "⏹ Bot to‘xtatildi!"})
+            else:
+                if float(b_row.get("expires_ts") or 0) <= time.time():
+                    bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "⛔️ Bot muddati tugagan! Avval +30 kunga uzaytiring.", "show_alert": True})
+                    return
+                deploy_and_start_hosted_bot(b_row)
+                bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "▶️ Bot ishga tushirildi!"})
+        elif act_name == "renew":
+            m_price = float(b_row.get("monthly_price") or 10000)
             rew = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (chat_id,)) or {}
             u_bal = float(rew.get("balance") or 0)
-            dyn_bot_price = float(get_file("set/bot_price.txt").strip() or BOT_CODE_PRICE)
-            dyn_price_str = fmt_money(dyn_bot_price)
-            already_bought = get_file(f"user/{chat_id}.bot_bought").strip() == "1"
-            if not already_bought and u_bal < dyn_bot_price:
+            if u_bal < m_price:
                 bot(
                     "answerCallbackQuery",
                     {
                         "callback_query_id": cqid,
-                        "text": f"⛔️ Hisobingizda mablag‘ yetarli emas!\n\n💰 Bo‘t kodi narxi: {dyn_price_str} so‘m\n💵 Sizning hisobingiz: {fmt_money(u_bal)} so‘m",
+                        "text": f"⛔️ Hisobingizda mablag‘ yetarli emas!\nUzaytirish (+30 kun): {fmt_money(m_price)} so‘m",
                         "show_alert": True,
                     },
                 )
                 return
-
-            if not already_bought:
-                new_bal = round(u_bal - dyn_bot_price, 4)
-                database.execute("UPDATE `users` SET `balance` = ? WHERE `id` = ?", (fmt_money(new_bal), chat_id))
-                put_file(f"user/{chat_id}.bot_bought", "1")
-            else:
-                new_bal = u_bal
-
-            bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "✅ Bo‘t kodi fayli yuborilmoqda..."})
-            code_bytes = get_clean_bot_code_bytes()
-            send_document(
-                chat_id,
-                code_bytes,
-                "smm_bot_kod.py",
-                caption=(
-                    f"✅ <b>SMM Bo‘t kodi (fayl ko‘rinishida) tayyor!</b>\n\n"
-                    f"📁 <b>Fayl nomi:</b> <code>smm_bot_kod.py</code>\n"
-                    f"💰 <b>Narxi:</b> <b>70 000 so‘m</b>\n"
-                    f"💵 <b>Qolgan balansingiz:</b> <b>{fmt_money(new_bal)} so‘m</b>\n\n"
-                    f"🛠 <b>Ishga tushirish tartibi:</b>\n"
-                    f"1) Faylni ochib <code>BOT_TOKEN</code> va <code>ADMIN_ID</code> qatoriga o‘z ma'lumotlaringizni yozing.\n"
-                    f"2) Terminalda <code>python smm_bot_kod.py</code> buyrug‘i bilan ishga tushiring!"
-                ),
-                reply_markup=keyboard([[{"text": "⬅️ Hamkorlik bo‘limiga qaytish", "callback_data": "hamkor=back"}]]),
+            new_bal = round(u_bal - m_price, 2)
+            base_ts = max(time.time(), float(b_row.get("expires_ts") or 0))
+            new_exp_ts = base_ts + (30 * 86400)
+            new_exp_str = datetime.datetime.fromtimestamp(new_exp_ts).strftime("%Y.%m.%d %H:%M")
+            database.execute("UPDATE `users` SET `balance` = ? WHERE `id` = ?", (fmt_money(new_bal), chat_id))
+            database.execute(
+                "UPDATE `hosted_bots` SET `expires_ts` = ?, `expires_str` = ?, `status` = 'active', `is_trial` = 0 WHERE `id` = ?",
+                (new_exp_ts, new_exp_str, bid),
             )
-            if not already_bought and str(chat_id) != str(ADMIN):
-                sms(
-                    ADMIN,
-                    f"🤖 <b>Bo‘t kodi sotib olindi!</b>\n"
-                    f"👤 <b>Foydalanuvchi:</b> <a href='tg://user?id={chat_id}'>{chat_id}</a>\n"
-                    f"💰 <b>To‘lov:</b> 70 000 so‘m",
+            b_row_updated = database.fetch_one("SELECT * FROM `hosted_bots` WHERE `id` = ?", (bid,))
+            if b_row_updated:
+                deploy_and_start_hosted_bot(b_row_updated)
+            bot("answerCallbackQuery", {"callback_query_id": cqid, "text": f"✅ Bot muddati +30 kunga ({new_exp_str} gacha) uzaytirildi!", "show_alert": True})
+        elif act_name == "del":
+            _stop_hosted_bot_proc(bid)
+            database.execute("DELETE FROM `hosted_bots` WHERE `id` = ?", (bid,))
+            shutil.rmtree(os.path.join(config.HOSTED_BOTS_DIR, f"bot_{bid}"), ignore_errors=True)
+            bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "🗑️ Bot serverdan o‘chirildi!"})
+
+        # Refresh "my_bots" view
+        my_rows = database.fetch_all("SELECT * FROM `hosted_bots` WHERE `owner_id` = ? ORDER BY `id` DESC", (chat_id,))
+        if not my_rows:
+            edit(
+                chat_id,
+                message_id,
+                "📂 <b>Mening serverdagi bo‘tlarim</b>\n\n🤷‍♂️ Sizda hozircha serverga ulangan botlar yo‘q.",
+                keyboard([[{"text": "⬅️ Orqaga", "callback_data": "hamkor=bot"}]]),
+            )
+        else:
+            lines = ["📂 <b>Sizning serverdagi bo‘tlaringiz:</b>\n"]
+            kb_rows = []
+            for b in my_rows:
+                b_i = int(b["id"])
+                running = _is_hosted_bot_running(b_i) and b.get("status") == "active"
+                st_txt = "🟢 Ishlamoqda" if running else ("🔴 Muddati tugagan" if b.get("status") == "expired" else "⏸ To‘xtatilgan")
+                lines.append(
+                    f"🤖 <b>#{b_i} | @{b['bot_username'].lstrip('@')}</b>\n"
+                    f"   🏷 Tarif: <b>{b['tariff_plan']}</b> ({fmt_money(b['monthly_price'])} so‘m/oy)\n"
+                    f"   👑 Admin ID: <code>{b['bot_admin_id']}</code> | Holati: <b>{st_txt}</b>\n"
+                    f"   ⏳ Muddati: <code>{b['expires_str']}</code> gacha"
                 )
+                kb_rows.append([
+                    {"text": f"🔄 Restart (#{b_i})", "callback_data": f"mybot_act=restart={b_i}"},
+                    {"text": f"{'⏹ To‘xtatish' if running else '▶️ Yoqish'} (#{b_i})", "callback_data": f"mybot_act=toggle={b_i}"},
+                ])
+                kb_rows.append([
+                    {"text": f"⏳ +30 kun uzaytirish ({fmt_money(b['monthly_price'])} so‘m)", "callback_data": f"mybot_act=renew={b_i}"},
+                    {"text": f"🗑️ O‘chirish (#{b_i})", "callback_data": f"mybot_act=del={b_i}"},
+                ])
+            kb_rows.append([{"text": "⬅️ Orqaga", "callback_data": "hamkor=bot"}])
+            edit(chat_id, message_id, "\n\n".join(lines), keyboard(kb_rows))
         return
 
     if data.startswith("apidetail="):
@@ -4090,7 +4711,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             ],
             [
                 {"text": "📝 Pul ishlash sarlavha matni", "callback_data": "adm_earn=header"},
-                {"text": f"🤖 Bo‘t narxi ({bot_price})", "callback_data": "adm_earn=bot_price"},
+                {"text": "🖥 Server & SMM Bot tariflari", "callback_data": "adm_earn=tariffs"},
             ],
         ])
         return txt, kb
@@ -4140,11 +4761,33 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             del_msg(chat_id, message_id)
             sms(chat_id, f"🎁 <b>Kunlik bonus miqdorini kiriting (so‘mda):</b>\n\nJoriy miqdor: <code>{cur_amt}</code> so‘m", AORT_KB)
             put_file(f"user/{chat_id}.step", "adm_set_daily_amt")
-        elif act == "bot_price":
-            cur_bp = get_file("set/bot_price.txt").strip() or str(BOT_CODE_PRICE)
-            del_msg(chat_id, message_id)
-            sms(chat_id, f"🤖 <b>Hamkorlik bo‘limidagi Bo‘t kodi narxini kiriting (so‘mda):</b>\n\nJoriy narx: <code>{cur_bp}</code> so‘m", AORT_KB)
-            put_file(f"user/{chat_id}.step", "adm_set_bot_price")
+        elif act == "tariffs":
+            go_p = fmt_money(get_file("set/tariff_go.txt").strip() or 15000)
+            pro_p = fmt_money(get_file("set/tariff_pro.txt").strip() or 30000)
+            plus_p = fmt_money(get_file("set/tariff_plus.txt").strip() or 50000)
+            smm_p = fmt_money(get_file("set/smm_bot_monthly.txt").strip() or 10000)
+            hosted_cnt = database.count_rows("hosted_bots")
+            edit(
+                chat_id,
+                message_id,
+                f"🖥 <b>Server va SMM Bot Tariflari Boshqaruvi:</b>\n\n"
+                f"🟢 <b>GO tarifi:</b> <code>{go_p} so‘m/oy</code>\n"
+                f"🔵 <b>PRO tarifi:</b> <code>{pro_p} so‘m/oy</code>\n"
+                f"🟣 <b>PLUS tarifi:</b> <code>{plus_p} so‘m/oy</code>\n"
+                f"🚀 <b>SMM Bot oylik narxi:</b> <code>{smm_p} so‘m/oy</code> (1-marta 7 kun tekin)\n"
+                f"🤖 <b>Jami ulangan botlar:</b> <code>{hosted_cnt} ta</code>",
+                keyboard([
+                    [
+                        {"text": f"🟢 GO ({go_p})", "callback_data": "adm_trf=tariff_go.txt"},
+                        {"text": f"🔵 PRO ({pro_p})", "callback_data": "adm_trf=tariff_pro.txt"},
+                    ],
+                    [
+                        {"text": f"🟣 PLUS ({plus_p})", "callback_data": "adm_trf=tariff_plus.txt"},
+                        {"text": f"🚀 SMM Bot ({smm_p})", "callback_data": "adm_trf=smm_bot_monthly.txt"},
+                    ],
+                    [{"text": "⬅️ Orqaga", "callback_data": "adm_earn=home"}],
+                ]),
+            )
         elif act == "header":
             del_msg(chat_id, message_id)
             sms(chat_id, "📝 <b>Pul ishlash bo‘limi sarlavha matnini yuboring:</b>", AORT_KB)
@@ -4278,14 +4921,23 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             sms(cid, "⚠️ Faqat raqam kiriting (masalan: 100):", AORT_KB)
         return
 
-    if step == "adm_set_bot_price" and cid == ADMIN and text:
+    if data.startswith("adm_trf=") and chat_id == ADMIN:
+        fname = data.split("=", 1)[1]
+        put_file("set/tmp_trf_file.txt", fname)
+        del_msg(chat_id, message_id)
+        sms(chat_id, f"💰 <b>Yangi oylik narxni kiriting (so‘mda, faqat raqam):</b>", AORT_KB)
+        put_file(f"user/{chat_id}.step", "adm_set_trf_price")
+        return
+
+    if step == "adm_set_trf_price" and cid == ADMIN and text:
         clean_v = text.strip().replace(" ", "")
-        if clean_v.replace(".", "", 1).isdigit():
-            put_file("set/bot_price.txt", clean_v)
+        fname = get_file("set/tmp_trf_file.txt").strip()
+        if clean_v.replace(".", "", 1).isdigit() and fname:
+            put_file(f"set/{fname}", clean_v)
             unlink_file(f"user/{cid}.step")
-            sms(cid, f"✅ Bo‘t kodi narxi <b>{fmt_money(clean_v)} so‘m</b> etib saqlandi!", PANEL_KB)
+            sms(cid, f"✅ Tarif narxi <b>{fmt_money(clean_v)} so‘m / oy</b> etib saqlandi!", PANEL_KB)
         else:
-            sms(cid, "⚠️ Faqat raqam kiriting (masalan: 70000):", AORT_KB)
+            sms(cid, "⚠️ Faqat raqam kiriting (masalan: 10000):", AORT_KB)
         return
 
     if step == "adm_set_earn_header" and cid == ADMIN and text:
@@ -4952,7 +5604,8 @@ def run_polling() -> None:
     else:
         print(f"❌ BOT_TOKEN xatoligi: {me_info}")
 
-    # 4. Cron oqimini fonda ishga tushiramiz
+    # 4. Cron oqimini va saqlangan mijoz botlarini fonda ishga tushiramiz
+    restore_all_active_hosted_bots()
     threading.Thread(target=_cron_worker, daemon=True).start()
     print("🚀 Telegram bot MODULLI TURBO rejimda ishga tushdi! (Javob tezligi ~0.08s - 0.15s)")
 
