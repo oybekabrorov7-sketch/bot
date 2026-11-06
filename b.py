@@ -28,6 +28,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import os
 
+
 class Config:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -5594,10 +5595,12 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             sms(
                 chat_id,
                 "📋 <b>Yangi vazifa ma'lumotlarini 4 qatorda yuboring:</b>\n\n"
-                "1-qator: Vazifa nomi\n"
-                "2-qator: Vazifa sharti (izoh)\n"
-                "3-qator: Havola (https://...)\n"
-                "4-qator: Mukofot summasi (faqat raqam, masalan: 250)",
+                "1-qator: Vazifa nomi (masalan: <i>Kanalga obuna bo‘ling</i>)\n"
+                "2-qator: Sharti (masalan: <i>Obuna bo‘lib skrinshot yuboring</i>)\n"
+                "3-qator: Havola yoki @username (masalan: <i>https://t.me/kanal</i> yoki <i>@kanal</i>)\n"
+                "4-qator: Mukofot summasi (masalan: <b>250</b> yoki <b>25</b>)\n\n"
+                "💡 <b>Tayyor namuna (nusxa olish uchun):</b>\n"
+                "<code>Kanalga obuna bo‘ling\nKanalga a'zo bo‘ling\n@ANTAARAB_SMM_ORG_BOT\n25</code>",
                 AORT_KB,
             )
             put_file(f"user/{chat_id}.step", "adm_add_earn_tsk")
@@ -5748,16 +5751,56 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
 
     if step == "adm_add_earn_tsk" and is_admin_id(cid) and text:
         lines = [ln.strip() for ln in text.strip().split("\n") if ln.strip()]
-        if len(lines) >= 4 and lines[3].replace(".", "", 1).isdigit():
+        t_name = lines[0] if len(lines) >= 1 else ""
+        t_desc = lines[1] if len(lines) >= 2 else ""
+        t_url = lines[2] if len(lines) >= 3 else ""
+        t_last = lines[3] if len(lines) >= 4 else (lines[-1] if len(lines) >= 3 else "")
+
+        # 4-qatordan yoki matndan mukofot summasini (raqamni) topamiz
+        rew_nums = re.findall(r"\b([0-9]+(?:\.[0-9]+)?)\b", t_last)
+        if not rew_nums and len(lines) >= 3:
+            rew_nums = re.findall(r"\b([0-9]+(?:\.[0-9]+)?)\b", text)
+
+        if len(lines) >= 3 and rew_nums and t_name:
+            rew_val = rew_nums[0]
+            # Agar havola @user ko'rinishida bo'lsa, uni to'g'ri t.me havolasiga aylantiramiz
+            if t_url.startswith("@"):
+                t_url = f"https://t.me/{t_url.lstrip('@')}"
+            elif not t_url.startswith("http://") and not t_url.startswith("https://"):
+                t_url = f"https://{t_url}"
+
             v_mode = get_file("set/tmp_tsk_mode.txt").strip() or "auto"
+            if "rasm" in text.lower() or "skrinshot" in text.lower():
+                v_mode = "proof"
+
             database.execute(
                 "INSERT INTO `earn_tasks` (`title`, `description`, `url`, `reward`, `verify_type`, `status`) VALUES (?, ?, ?, ?, ?, 'on')",
-                (lines[0], lines[1], lines[2], lines[3], v_mode),
+                (t_name, t_desc, t_url, rew_val, v_mode),
             )
             unlink_file(f"user/{cid}.step")
-            sms(cid, f"✅ Yangi vazifa («<b>{lines[0]}</b>» — +{lines[3]} so‘m) qo‘shildi!", PANEL_KB)
+            v_type_str = "📸 Skrinshot bilan tekshirish" if v_mode == "proof" else "⚡ Avto-tekshirish"
+            sms(
+                cid,
+                f"✅ <b>Yangi vazifa muvaffaqiyatli qo‘shildi!</b>\n\n"
+                f"📌 <b>Nomi:</b> {t_name}\n"
+                f"📝 <b>Sharti:</b> {t_desc}\n"
+                f"🔗 <b>Havola:</b> {t_url}\n"
+                f"💰 <b>Mukofot:</b> {fmt_money(rew_val)} so‘m\n"
+                f"🔍 <b>Turi:</b> {v_type_str}",
+                PANEL_KB,
+            )
         else:
-            sms(cid, "⚠️ Iltimos, ma'lumotlarni to‘liq 4 qatorda va 4-qatorda faqat raqam bilan yuboring!", AORT_KB)
+            sms(
+                cid,
+                "⚠️ <b>Xatolik!</b> Ma'lumotlarni quyidagi tartibda 4 qatorda yuboring:\n\n"
+                "1-qator: Vazifa nomi\n"
+                "2-qator: Vazifa sharti\n"
+                "3-qator: Havola (masalan: <code>@bot</code> yoki <code>https://...</code>)\n"
+                "4-qator: Mukofot summasi (masalan: <b>25</b> yoki <b>250</b>)\n\n"
+                "👇 <b>Quyidagi matnni nusxalab, yuborishingiz mumkin:</b>\n"
+                "<code>Kanalga obuna bo‘ling\nObuna bo‘lib skrinshot yuboring\n@ANTAARAB_SMM_ORG_BOT\n25</code>",
+                AORT_KB,
+            )
         return
 
     if step == "adm_add_promo" and is_admin_id(cid) and text:
