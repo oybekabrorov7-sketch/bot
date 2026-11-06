@@ -26,7 +26,6 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-
 import os
 
 class Config:
@@ -34,7 +33,7 @@ class Config:
 
     # Telegram Bot sozlamalari (@BotFather dan olingan token va Admin ID)
     BOT_TOKEN = os.getenv("BOT_TOKEN", "8655952088:AAGZq3Z5u-5r9onDaib-KO2K089J4jTHxJc")
-    ADMIN_ID = os.getenv("ADMIN_ID", "7552962971 ")
+    ADMIN_ID = os.getenv("ADMIN_ID", "7552962971")
     BOT_USERNAME = os.getenv("BOT_USERNAME", "ANTAARAB_SMM_ORG_BOT")
 
 
@@ -284,7 +283,15 @@ class DatabaseModule:
                 `expires_str` TEXT NOT NULL DEFAULT '',
                 `script_path` TEXT NOT NULL DEFAULT ''
             )""",
+            """CREATE TABLE IF NOT EXISTS `admins` (
+                `id` INTEGER PRIMARY KEY AUTOINCREMENT,
+                `user_id` TEXT UNIQUE NOT NULL,
+                `role` TEXT NOT NULL DEFAULT 'admin',
+                `added_by` TEXT NOT NULL DEFAULT '',
+                `added_at` TEXT NOT NULL DEFAULT ''
+            )""",
             "CREATE INDEX IF NOT EXISTS `idx_hosted_bots_owner` ON `hosted_bots` (`owner_id`)",
+            "CREATE INDEX IF NOT EXISTS `idx_admins_uid` ON `admins` (`user_id`)",
         ]
         for stmt in schema_statements:
             cur.execute(stmt)
@@ -1724,9 +1731,89 @@ top_raiting = referal_top
 _JOINCHAT_CACHE: Dict[str, float] = {}
 
 
+
+# ============================================================================
+# MULTI-ADMIN BOSHQARUV TIZIMI (Admin qo'shish, tekshirish va o'chirish)
+# ============================================================================
+_SECONDARY_ADMINS_CACHE: Optional[set] = None
+_ADMINS_LOCK = threading.RLock()
+
+
+def get_secondary_admins() -> List[str]:
+    """Bazada saqlangan barcha qo'shimcha adminlar ro'yxatini qaytaradi."""
+    global _SECONDARY_ADMINS_CACHE
+    with _ADMINS_LOCK:
+        try:
+            rows = database.fetch_all("SELECT `user_id` FROM `admins`")
+            res = [str(r["user_id"]).strip() for r in rows if str(r["user_id"]).strip()]
+            _SECONDARY_ADMINS_CACHE = set(res)
+            return res
+        except Exception:
+            txt = get_file("set/admins.txt").strip()
+            res = [ln.strip() for ln in txt.split("\n") if ln.strip()]
+            _SECONDARY_ADMINS_CACHE = set(res)
+            return res
+
+
+def is_admin_id(uid: Union[str, int, None]) -> bool:
+    """Foydalanuvchi asosiy ADMIN yoki tayinlangan qo'shimcha Admin ekanligini tekshiradi."""
+    if not uid:
+        return False
+    u_str = str(uid).strip()
+    if u_str == ADMIN:
+        return True
+    global _SECONDARY_ADMINS_CACHE
+    with _ADMINS_LOCK:
+        if _SECONDARY_ADMINS_CACHE is None:
+            get_secondary_admins()
+        return bool(_SECONDARY_ADMINS_CACHE and u_str in _SECONDARY_ADMINS_CACHE)
+
+
+def add_secondary_admin(uid: Union[str, int], added_by: str = "") -> bool:
+    """Yangi admin qo'shadi (baza va keshga saqlaydi)."""
+    u_str = str(uid).strip()
+    if not u_str or u_str == ADMIN:
+        return False
+    now_str = datetime.datetime.now().strftime("%Y.%m.%d %H:%M")
+    try:
+        database.execute(
+            """INSERT INTO `admins` (`user_id`, `role`, `added_by`, `added_at`)
+            VALUES (?, 'admin', ?, ?)
+            ON CONFLICT(`user_id`) DO UPDATE SET `role` = 'admin', `added_at` = ?""",
+            (u_str, str(added_by), now_str, now_str),
+        )
+    except Exception:
+        pass
+    cur_admins = get_secondary_admins()
+    if u_str not in cur_admins:
+        cur_admins.append(u_str)
+        put_file("set/admins.txt", "\n".join(cur_admins))
+    with _ADMINS_LOCK:
+        if _SECONDARY_ADMINS_CACHE is not None:
+            _SECONDARY_ADMINS_CACHE.add(u_str)
+    return True
+
+
+def remove_secondary_admin(uid: Union[str, int]) -> bool:
+    """Adminlik huquqini olib tashlaydi."""
+    u_str = str(uid).strip()
+    if not u_str or u_str == ADMIN:
+        return False
+    try:
+        database.execute("DELETE FROM `admins` WHERE `user_id` = ?", (u_str,))
+    except Exception:
+        pass
+    cur_admins = [a for a in get_secondary_admins() if a != u_str]
+    put_file("set/admins.txt", "\n".join(cur_admins))
+    with _ADMINS_LOCK:
+        if _SECONDARY_ADMINS_CACHE is not None:
+            _SECONDARY_ADMINS_CACHE.discard(u_str)
+    return True
+
+
 def joinchat(user_id: Union[str, int]) -> bool:
     uid_str = str(user_id)
-    if uid_str == ADMIN:
+    if uid_str == ADMIN or is_admin_id(uid_str):
         return True
     ch_text = (get_file("set/channel").strip() or get_file("set/channel.txt").strip())
     if not ch_text:
@@ -1806,7 +1893,7 @@ AORT_KB = reply_keyboard([[{"text": "🗄️ Boshqaruv"}]])
 
 PANEL_KB = reply_keyboard([
     [{"text": "⚙️ Asosiy sozlamalar"}, {"text": "💳 Hamyonlar sozlamalari"}],
-    [{"text": "💵 Pul ishlash sozlamalari"}],
+    [{"text": "💵 Pul ishlash sozlamalari"}, {"text": "👑 Admin qo‘shish"}],
     [{"text": "🔔 Xabar yuborish"}, {"text": "📊 Statistika"}],
     [{"text": "👤 Foydalanuvchini boshqarish"}],
     [{"text": "🇺🇿 Valyuta kursi"}, {"text": "⏰ Cron sozlamasi"}],
@@ -2500,20 +2587,16 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
     stepc = get_file(f"user/{chat_id}.step").strip() if chat_id else ""
     saved = get_file("user/us.id").strip()
 
-    is_admin = (cid == ADMIN) or (chat_id == ADMIN)
+    is_admin = is_admin_id(cid) or is_admin_id(chat_id)
     m_kb = MENU_ADMIN_KB if is_admin else MENU_USER_KB
 
-    # /admin yoki Boshqaruv tugmasi bosilganda agar ADMIN_ID boshqa bo'lsa, foydalanuvchiga ID sini ko'rsatamiz
-    if text in ("/admin", "/panel"):
-        if cid == ADMIN:
+    # /admin yoki Boshqaruv tugmasi bosilganda
+    if text in ("/admin", "/panel", "🗄️ Boshqaruv"):
+        if is_admin_id(cid):
             sms(cid, "🖥️ Boshqaruv paneli", PANEL_KB)
             unlink_file(f"user/{cid}.step")
         else:
-            sms(cid, f"⚠️ Siz Admin emassiz.\nSizning Telegram ID raqamingiz: <code>{cid}</code>\n(Admin bo'lish uchun tg.py dagi ADMIN_ID qatoriga ushbu ID ni yozing).")
-        return
-
-    if text == "🗄️ Boshqaruv" and cid != ADMIN:
-        sms(cid, f"⚠️ Boshqaruv paneliga kirish uchun tg.py faylidagi <b>ADMIN_ID</b> ga o'z ID raqamingizni yozing:\n\nSizning ID raqamingiz: <code>{cid}</code>")
+            sms(cid, f"⚠️ Siz Admin emassiz.\nSizning Telegram ID raqamingiz: <code>{cid}</code>\n(Admin bo'lish uchun Asosiy Admin sizni Admin qilib tayinlashi kerak).")
         return
 
     # /start user<ref_id> referal tizimi
@@ -2556,7 +2639,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
     # Agar foydalanuvchi asosiy menyu tugmalaridan birini bossa, eski tugallanmagan step'ni tozalaymiz
     MAIN_BUTTONS = {
         "/start", "/admin", "/panel", "➡️ Orqaga", "⏪ Orqaga", "🗄️ Boshqaruv",
-        "⚙️ Asosiy sozlamalar", "💳 Hamyonlar sozlamalari", "💵 Pul ishlash sozlamalari", "🔔 Xabar yuborish",
+        "⚙️ Asosiy sozlamalar", "💳 Hamyonlar sozlamalari", "💵 Pul ishlash sozlamalari", "👑 Admin qo‘shish", "🔔 Xabar yuborish",
         "📊 Statistika", "👤 Foydalanuvchini boshqarish", "🇺🇿 Valyuta kursi",
         "⏰ Cron sozlamasi", "🛍 Buyurtmalarni sozlash",
         "💵 Kursni o‘rnatish", "⚖️ Foizni o‘rnatish", "📊 Buyurtmani tekshirish",
@@ -2580,12 +2663,12 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         sms(cid, "🖥️ Asosiy menyudasiz", m_kb)
         return
 
-    if text == "🗄️ Boshqaruv" and cid == ADMIN:
+    if text == "🗄️ Boshqaruv" and is_admin_id(cid):
         sms(cid, "🖥️ Boshqaruv paneli", PANEL_KB)
         unlink_file(f"user/{cid}.step")
         return
 
-    if text == "⚙️ Asosiy sozlamalar" and cid == ADMIN:
+    if text == "⚙️ Asosiy sozlamalar" and is_admin_id(cid):
         sms(cid, text, PANEL2_KB)
         return
 
@@ -2622,7 +2705,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         sms(chat_id, "🖥️ Asosiy menyudasiz", m_kb)
         return
 
-    if text == "⏰ Cron sozlamasi" and cid == ADMIN:
+    if text == "⏰ Cron sozlamasi" and is_admin_id(cid):
         sms(
             cid,
             f"📝 Quyidagi manzillarni cron qiling\n"
@@ -2633,7 +2716,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         )
         return
 
-    if text == "📊 Statistika" and cid == ADMIN:
+    if text == "📊 Statistika" and is_admin_id(cid):
         st = _get_order_And_user_stats()
         sms(
             cid,
@@ -2747,7 +2830,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             sms(cid2, "✅ Jarayon tugallandi.")
         return
 
-    if text == "🔔 Xabar yuborish" and cid == ADMIN:
+    if text == "🔔 Xabar yuborish" and is_admin_id(cid):
         row = database.fetch_one("SELECT * FROM `send` LIMIT 1")
         if not row:
             sms(cid, "<b>📤 Foydalanuvchilarga yuboriladigan xabarni botga yuboring!</b>", AORT_KB)
@@ -2760,7 +2843,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             )
         return
 
-    if step == "send" and cid == ADMIN and message:
+    if step == "send" and is_admin_id(cid) and message:
         stat = database.count_rows("users")
         last_user = database.fetch_one("SELECT * FROM `users` WHERE `user_id` = ?", (stat,))
         stop_uid = str(last_user["id"]) if last_user else "0"
@@ -2787,7 +2870,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
     # ADMIN PANEL: Boshqa sozlamalar (Matnlar, Hamyonlar, Avto to'lov, Referal)
     # ========================================================================
 
-    if text == "💳 Hamyonlar sozlamalari" and cid == ADMIN:
+    if text == "💳 Hamyonlar sozlamalari" and is_admin_id(cid):
         delturi = get_file("set/payments.txt")
         lines = [ln.strip() for ln in delturi.split("\n") if ln.strip()]
         kb_rows = [[{"text": f"🗑️ {title} - ni o'chirish", "callback_data": f"delPayMethod-{title}"}] for title in lines]
@@ -2796,7 +2879,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         sms(cid, "<b>💳 To'lov tizimlari va kartalar sozlamalari:</b>", keyboard(kb_rows))
         return
 
-    if text == "⚙️ Boshqa sozlamalar" and cid == ADMIN:
+    if text == "⚙️ Boshqa sozlamalar" and is_admin_id(cid):
         sms(
             cid,
             "⭐ Kerakli bo'limni tanlang:",
@@ -2872,7 +2955,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             kb_rows = [[{"text": f"{title} - ni o'chirish", "callback_data": f"delPayMethod-{title}"}] for title in lines]
             kb_rows.append([{"text": "➕ Yangi to'lov tizimi qo'shish", "callback_data": "new"}])
             kb_rows.append([{"text": "Orqaga", "callback_data": "birlamch=exit"}])
-            if cid2 == ADMIN:
+            if is_admin_id(cid2):
                 sms(cid2, "<b>Quyidagilardan birini tanlang:</b>", keyboard(kb_rows))
         elif res == "autopays":
             edit(
@@ -2923,7 +3006,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             put_file(f"user/{cid2}.step", "%%₹_-#")
         return
 
-    if step == "%%₹_-#" and cid == ADMIN and text:
+    if step == "%%₹_-#" and is_admin_id(cid) and text:
         clean_payme = text.strip()
         if "payme.uz/" in clean_payme or "paycom.uz/" in clean_payme:
             card = clean_payme.rstrip("/").split("/")[-1]
@@ -2952,13 +3035,13 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         put_file(f"user/{cid2}.step", "turi")
         return
 
-    if step == "turi" and cid == ADMIN and text:
+    if step == "turi" and is_admin_id(cid) and text:
         put_file("set/title.txt", text)
         sms(cid, "🔢 <b>Ushbu to'lov tizimidagi hamyoningiz raqamini yuboring:</b>")
         put_file(f"user/{cid}.step", "wallet")
         return
 
-    if step == "wallet" and cid == ADMIN and text:
+    if step == "wallet" and is_admin_id(cid) and text:
         put_file("set/wallet.txt", text)
         sms(
             cid,
@@ -2968,7 +3051,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         put_file(f"user/{cid}.step", "addition")
         return
 
-    if step == "addition" and cid == ADMIN and text:
+    if step == "addition" and is_admin_id(cid) and text:
         ttest = get_file("set/title.txt").strip()
         put_file("set/payments.txt", f"\n{ttest}", append=True)
         put_file(f"set/pay/{ttest}/addition.txt", text)
@@ -3004,7 +3087,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             put_file(f"user/{cid2}.step", "*##")
         return
 
-    if step == "*##" and cid == ADMIN and text and text.isdigit():
+    if step == "*##" and is_admin_id(cid) and text and text.isdigit():
         database.execute("UPDATE `settings` SET `bonus` = ? WHERE `id` = 1", (text,))
         sms(cid, "✅ O‘zgarish saqlandi", PANEL_KB)
         unlink_file(f"user/{cid}.step")
@@ -3026,7 +3109,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         put_file(f"user/{chat_id}.step", "!?+-")
         return
 
-    if step == "!?+-" and cid == ADMIN and text:
+    if step == "!?+-" and is_admin_id(cid) and text:
         vq = get_file("bir.txt").strip()
         if vq in ("start", "kabinet", "referal", "orders"):
             vo = enc("encode", text)
@@ -3046,7 +3129,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         put_file(f"user/{cid}.step", "orders2")
         return
 
-    if step == "orders2" and cid == ADMIN and text and text.isdigit():
+    if step == "orders2" and is_admin_id(cid) and text and text.isdigit():
         stati = database.fetch_one("SELECT * FROM `orders` WHERE `order_id` = ?", (int(text),))
         if not stati:
             sms(cid, "❌ Buyurtma topilmadi.", AORT_KB)
@@ -3068,7 +3151,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             unlink_file(f"user/{cid}.step")
         return
 
-    if (text == "🔑 API Sozlamalari" and cid == ADMIN) or data == "api1":
+    if (text == "🔑 API Sozlamalari" and is_admin_id(cid)) or data == "api1":
         target_chat = cid if text else chat_id
         if data == "api1":
             del_msg(chat_id, message_id)
@@ -3118,7 +3201,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             put_file(f"user/{cid2}.step", f"kalitnew={co}")
         return
 
-    if step.startswith("kalitnew=") and cid == ADMIN and text:
+    if step.startswith("kalitnew=") and is_admin_id(cid) and text:
         io = step.split("=")[1]
         database.execute("UPDATE `providers` SET `api_key` = ? WHERE `id` = ?", (text, io))
         sms(cid, "✅ O‘zgartirish muvaffaqiyatli amalga oshirildi.", PANEL_KB)
@@ -3155,7 +3238,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         put_file(f"user/{chat_id}.step", "api_url")
         return
 
-    if step == "api_url" and cid == ADMIN and text:
+    if step == "api_url" and is_admin_id(cid) and text:
         if "https://" in text:
             put_file("set/api_url", text.strip())
             sms(cid, f"{text} <b>qabul qilindi!</b>\n\nEndi esa ushbu saytdan olingan API_KEY'ni kiriting:")
@@ -3164,7 +3247,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             sms(cid, "<b>API manzilini yuboring:\n\nNamuna:</b> <pre>https://apiseen.uz/api/v2</pre>")
         return
 
-    if step == "api" and cid == ADMIN and text:
+    if step == "api" and is_admin_id(cid) and text:
         api_url = get_file("set/api_url").strip()
         raw = http_get(f"{api_url}?key={text.strip()}&action=balance")
         try:
@@ -3868,7 +3951,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
     # ADMIN PANEL: Bo'limlar, Ichki bo'limlar va Xizmatlarni sozlash
     # ========================================================================
 
-    if (text == "🛍 Buyurtmalarni sozlash" and cid == ADMIN) or data == "xsetting":
+    if (text == "🛍 Buyurtmalarni sozlash" and is_admin_id(cid)) or data == "xsetting":
         target = ADMIN if text else chat_id
         if data == "xsetting":
             del_msg(chat_id, message_id)
@@ -4367,7 +4450,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         put_file(f"user/{cid2}.step", f"editXizmatlar-{xiz}")
         return
 
-    if step.startswith("editXizmatlar-") and cid == ADMIN and text:
+    if step.startswith("editXizmatlar-") and is_admin_id(cid) and text:
         xiz = step.split("-")[1]
         ex = get_file(f"user/{cid}.txt").strip()
         if ex == "service_desc":
@@ -4489,7 +4572,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             put_file(f"user/{cid}.step", "servis0")
         return
 
-    if data.startswith("checkC-") and stepc == "servis0" and chat_id == ADMIN:
+    if data.startswith("checkC-") and stepc == "servis0" and is_admin_id(chat_id):
         pw = data.split("-")[1]
         sms(
             chat_id,
@@ -4508,7 +4591,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         put_file(f"user/{chat_id}.step", "servis1")
         return
 
-    if data.startswith("checkP-") and stepc == "servis1" and chat_id == ADMIN:
+    if data.startswith("checkP-") and stepc == "servis1" and is_admin_id(chat_id):
         pw = data.split("-")[1]
         del_msg(chat_id, message_id)
         sms(
@@ -4522,13 +4605,13 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         put_file(f"user/{chat_id}.step", "servis2")
         return
 
-    if step == "servis2" and cid == ADMIN and text:
+    if step == "servis2" and is_admin_id(cid) and text:
         sms(cid, "💵 Buyurtma narxini yuboring (1000 ta) uchun", AORT_KB)
         put_file("set/adds.json.desc", "" if text == "Kiritilmagan" else text)
         put_file(f"user/{cid}.step", "servis3")
         return
 
-    if step == "servis3" and cid == ADMIN and text and text.replace(".", "", 1).isdigit():
+    if step == "servis3" and is_admin_id(cid) and text and text.replace(".", "", 1).isdigit():
         sms(cid, "🆔 Xizmat IDsini yuboring:", AORT_KB)
         adds = json.loads(get_file("set/adds.json") or "{}")
         adds["service_price"] = text
@@ -4588,7 +4671,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
     # ADMIN PANEL: Kurs, Foiz, Foydalanuvchini boshqarish, Valyuta kursi
     # ========================================================================
 
-    if text == "💵 Kursni o‘rnatish" and cid == ADMIN:
+    if text == "💵 Kursni o‘rnatish" and is_admin_id(cid):
         r_usd = get_file("set/usd").strip() or "0"
         r_rub = get_file("set/rub").strip() or "0"
         r_inr = get_file("set/inr").strip() or "0"
@@ -4624,7 +4707,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             sms(cid, "⚠️ Faqat raqam kiriting (masalan: <code>12800</code>):", AORT_KB)
         return
 
-    if text == "⚖️ Foizni o‘rnatish" and cid == ADMIN:
+    if text == "⚖️ Foizni o‘rnatish" and is_admin_id(cid):
         p_row = database.fetch_one("SELECT * FROM `percent` WHERE `id` = 1")
         cur_p = p_row["percent"] if p_row else "0"
         sms(cid, f"⭐ Bot xizmatlari uchun foizni kiriting\n\n♻️ Joriy foiz: {cur_p}%", AORT_KB)
@@ -4637,24 +4720,191 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         put_file(f"user/{cid}.step", "")
         return
 
-    if text == "👤 Foydalanuvchini boshqarish" and cid == ADMIN:
+    
+    # ========================================================================
+    # ADMIN PANEL: 👑 ADMIN QO'SHISH VA ADMINLAR BOSHQARUVI
+    # ========================================================================
+
+    def _build_admin_manager_view() -> Tuple[str, str]:
+        sec_admins = get_secondary_admins()
+        lines = [
+            "👑 <b>Adminlar Boshqaruvi Paneli</b>\n",
+            f"⭐️ <b>Asosiy Admin (Ega):</b>\n• <code>{ADMIN}</code>\n",
+        ]
+        if sec_admins:
+            lines.append(f"👥 <b>Tayinlangan Adminlar ({len(sec_admins)} ta):</b>")
+            for i, a_id in enumerate(sec_admins, 1):
+                u_row = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (a_id,))
+                a_name = u_row.get("name", "") if u_row else ""
+                a_label = f" ({a_name})" if a_name else ""
+                lines.append(f"<b>{i}.</b> <a href='tg://user?id={a_id}'>{a_id}</a>{a_label}")
+        else:
+            lines.append("👥 <b>Tayinlangan Adminlar:</b>\n<i>Hozircha qo‘shimcha adminlar tayinlanmagan.</i>")
+
+        lines.append("\n👇 <i>Admin qo‘shish yoki o‘chirish uchun quyidagi tugmalardan birini tanlang:</i>")
+
+        kb_rows = [
+            [{"text": "➕ Yangi admin qo‘shish", "callback_data": "adm_mgr=add"}],
+        ]
+        if sec_admins:
+            kb_rows.append([{"text": f"🗑️ Adminni o‘chirish ({len(sec_admins)} ta)", "callback_data": "adm_mgr=del_menu"}])
+        kb_rows.append([{"text": "🔄 Ro‘yxatni yangilash", "callback_data": "adm_mgr=refresh"}])
+        return "\n".join(lines), keyboard(kb_rows)
+
+    if (text in ("👑 Admin qo‘shish", "/addadmin") or data == "adm_mgr=menu") and is_admin_id(cid or chat_id):
+        m_txt, m_kb_json = _build_admin_manager_view()
+        if data == "adm_mgr=menu":
+            edit(chat_id, message_id, m_txt, m_kb_json)
+        else:
+            sms(cid, m_txt, m_kb_json)
+        return
+
+    if data.startswith("adm_mgr=") and is_admin_id(chat_id):
+        act = data.split("=", 1)[1]
+        if act == "refresh":
+            m_txt, m_kb_json = _build_admin_manager_view()
+            edit(chat_id, message_id, m_txt, m_kb_json)
+            bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "🔄 Ro‘yxat yangilandi!"})
+        elif act == "add":
+            del_msg(chat_id, message_id)
+            sms(
+                chat_id,
+                "👑 <b>Yangi Admin Tayinlash</b>\n\n"
+                "Admin qilmoqchi bo‘lgan foydalanuvchining <b>Telegram ID</b> raqamini yuboring:\n\n"
+                "<i>Namuna:</i> <code>1234567890</code>",
+                AORT_KB,
+            )
+            put_file(f"user/{chat_id}.step", "adm_add_admin_step")
+        elif act == "del_menu":
+            sec_admins = get_secondary_admins()
+            if not sec_admins:
+                bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "Hozircha o‘chiradigan adminlar yo‘q!", "show_alert": True})
+                return
+            kb_rows = []
+            for a_id in sec_admins:
+                u_row = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (a_id,))
+                a_name = u_row.get("name", "") if u_row else f"ID: {a_id}"
+                kb_rows.append([{"text": f"🗑️ {a_name} ({a_id}) — O‘chirish", "callback_data": f"adm_del_do={a_id}"}])
+            kb_rows.append([{"text": "⬅️ Orqaga", "callback_data": "adm_mgr=menu"}])
+            edit(chat_id, message_id, "🗑️ <b>Adminlikdan olmoqchi bo‘lgan adminni tanlang:</b>", keyboard(kb_rows))
+        return
+
+    if step == "adm_add_admin_step" and is_admin_id(cid) and text:
+        clean_id = text.strip()
+        if not clean_id.isdigit():
+            sms(cid, "⚠️ <b>Faqat raqamlardan iborat Telegram ID kiriting!</b>\nQaytadan kiriting:", AORT_KB)
+            return
+        if clean_id == ADMIN:
+            sms(cid, "⚠️ <b>Bu raqam botning Asosiy Admini (Ega)!</b>", PANEL_KB)
+            unlink_file(f"user/{cid}.step")
+            return
+        if is_admin_id(clean_id):
+            sms(cid, f"⚠️ <b>Foydalanuvchi (ID: <code>{clean_id}</code>) allaqachon Admin!</b>", PANEL_KB)
+            unlink_file(f"user/{cid}.step")
+            return
+
+        chat_info = bot("getChat", {"chat_id": clean_id})
+        first_name = ""
+        uname = ""
+        if chat_info.get("ok") and isinstance(chat_info.get("result"), dict):
+            first_name = chat_info["result"].get("first_name", "")
+            uname = chat_info["result"].get("username", "")
+
+        add_secondary_admin(clean_id, added_by=cid)
+        unlink_file(f"user/{cid}.step")
+
+        # Notify the new admin
+        sms(
+            clean_id,
+            "🎉 <b>Tabriklaymiz! Siz ushbu botda Admin etib tayinlandingiz!</b>\n\n"
+            "Sizga barcha boshqaruv huquqlari berildi.\n"
+            "👉 <b>/admin</b> yoki <b>🗄️ Boshqaruv</b> buyrug‘i orqali Boshqaruv paneliga kirishingiz mumkin.",
+            MENU_ADMIN_KB,
+        )
+
+        name_display = f" ({first_name})" if first_name else (f" (@{uname})" if uname else "")
+        sms(
+            cid,
+            f"✅ <b>Foydalanuvchi (<code>{clean_id}</code>{name_display}) muvaffaqiyatli Admin etib tayinlandi!</b>\n\n"
+            f"Unga barcha admin huquqlari berildi va bildirishnoma yuborildi.",
+            PANEL_KB,
+        )
+        return
+
+    if data.startswith("adm_del_do=") and is_admin_id(chat_id):
+        target_uid = data.split("=", 1)[1].strip()
+        if target_uid == ADMIN:
+            bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "Asosiy Adminni o‘chirib bo‘lmaydi!", "show_alert": True})
+            return
+        remove_secondary_admin(target_uid)
+        sms(target_uid, "⚠️ <b>Sizning ushbu botdagi adminlik huquqingiz bekor qilindi.</b>", MENU_USER_KB)
+        bot("answerCallbackQuery", {"callback_query_id": cqid, "text": f"✅ Admin ({target_uid}) o‘chirildi!", "show_alert": True})
+        m_txt, m_kb_json = _build_admin_manager_view()
+        edit(chat_id, message_id, m_txt, m_kb_json)
+        return
+
+    if data.startswith("toggle_adm=") and is_admin_id(chat_id):
+        target_uid = data.split("=", 1)[1].strip()
+        if target_uid == ADMIN:
+            bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "Asosiy Adminni o‘zgartirib bo‘lmaydi!", "show_alert": True})
+            return
+        if is_admin_id(target_uid):
+            remove_secondary_admin(target_uid)
+            sms(target_uid, "⚠️ <b>Sizning adminlik huquqingiz bekor qilindi.</b>", MENU_USER_KB)
+            bot("answerCallbackQuery", {"callback_query_id": cqid, "text": f"👑 Foydalanuvchi ({target_uid}) adminlikdan olindi!", "show_alert": True})
+        else:
+            add_secondary_admin(target_uid, added_by=chat_id)
+            sms(
+                target_uid,
+                "🎉 <b>Tabriklaymiz! Siz ushbu botda Admin etib tayinlandingiz!</b>\n\n"
+                "Boshqaruv paneliga kirish uchun <b>/admin</b> buyrug‘ini bosing.",
+                MENU_ADMIN_KB,
+            )
+            bot("answerCallbackQuery", {"callback_query_id": cqid, "text": f"✅ Foydalanuvchi ({target_uid}) Admin etib tayinlandi!", "show_alert": True})
+
+        # Re-render user management card
+        rew = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (target_uid,))
+        if rew:
+            pul = rew.get("balance", "0")
+            bans = "🔔 Banlash" if rew.get("status") == "active" else "🔕 Bandan olish"
+            is_sub = is_admin_id(target_uid)
+            adm_btn_text = "👑 Adminlikdan olish" if is_sub else "👑 Admin qilish"
+            edit(
+                chat_id,
+                message_id,
+                f"<b>Foydalanuvchi ma'lumotlari:</b>\n\nID: <a href='tg://user?id={target_uid}'>{target_uid}</a>\n"
+                f"Balans: {pul} so‘m\nHolat: <b>{'👑 Admin' if is_sub else '👤 Oddiy foydalanuvchi'}</b>",
+                keyboard([
+                    [{"text": bans, "callback_data": "ban"}],
+                    [{"text": "➕ Pul qo'shish", "callback_data": "plus"}, {"text": "➖ Pul ayirish", "callback_data": "minus"}],
+                    [{"text": adm_btn_text, "callback_data": f"toggle_adm={target_uid}"}],
+                ]),
+            )
+        return
+
+
+    if text == "👤 Foydalanuvchini boshqarish" and is_admin_id(cid):
         sms(cid, "<b>Kerakli foydalanuvchining ID raqamini kiriting:</b>", AORT_KB)
         put_file(f"user/{cid}.step", "iD")
         return
 
-    if step == "iD" and cid == ADMIN and text:
+    if step == "iD" and is_admin_id(cid) and text:
         rew = database.fetch_one("SELECT * FROM `users` WHERE `user_id` = ? OR `id` = ?", (text, text))
         if rew:
             idi = str(rew["id"])
             put_file("user/us.id", idi)
             pul = rew["balance"]
             bans = "🔔 Banlash" if rew.get("status") == "active" else "🔕 Bandan olish"
+            is_sub = is_admin_id(idi)
+            adm_btn_text = "👑 Adminlikdan olish" if is_sub else "👑 Admin qilish"
             sms(
                 cid,
-                f"<b>Foydalanuvchi topildi!\n\nID:</b> <a href='tg://user?id={idi}'>{text}</a>\n<b>Balans: {pul} so‘m</b>",
+                f"<b>Foydalanuvchi topildi!\n\nID:</b> <a href='tg://user?id={idi}'>{text}</a>\n<b>Balans: {pul} so‘m</b>\n"
+                f"Holati: <b>{'👑 Admin' if is_sub else '👤 Oddiy foydalanuvchi'}</b>",
                 keyboard([
                     [{"text": bans, "callback_data": "ban"}],
                     [{"text": "➕ Pul qo'shish", "callback_data": "plus"}, {"text": "➖ Pul ayirish", "callback_data": "minus"}],
+                    [{"text": adm_btn_text, "callback_data": f"toggle_adm={idi}"}],
                 ]),
             )
             unlink_file(f"user/{cid}.step")
@@ -4667,7 +4917,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         put_file(f"user/{chat_id}.step", "plus")
         return
 
-    if step == "plus" and cid == ADMIN and text:
+    if step == "plus" and is_admin_id(cid) and text:
         if text.lstrip("-").replace(".", "", 1).isdigit():
             val = float(text)
             rew = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (saved,))
@@ -4698,7 +4948,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         put_file(f"user/{chat_id}.step", "minus")
         return
 
-    if step == "minus" and cid == ADMIN and text:
+    if step == "minus" and is_admin_id(cid) and text:
         if text.lstrip("-").replace(".", "", 1).isdigit():
             val = float(text)
             rew = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (saved,))
@@ -4715,7 +4965,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
 
     if data == "ban":
         rew = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (saved,))
-        if ADMIN != saved and rew:
+        if saved != ADMIN and str(saved) != str(cid) and rew:
             if rew.get("status") == "deactive":
                 database.execute("UPDATE `users` SET `status` = 'active' WHERE `id` = ?", (saved,))
                 sms(chat_id, f"<b>Foydalanuvchi ({saved}) bandan olindi!</b>", PANEL_KB)
@@ -4726,7 +4976,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             bot("answerCallbackQuery", {"callback_query_id": qid, "text": "Bloklash mumkin emas!", "show_alert": True})
         return
 
-    if text == "🇺🇿 Valyuta kursi" and cid == ADMIN:
+    if text == "🇺🇿 Valyuta kursi" and is_admin_id(cid):
         raw = http_get("https://cbu.uz/uz/arkhiv-kursov-valyut/json/")
         rates = {"USD": "?", "RUB": "?", "INR": "?", "TRY": "?"}
         try:
@@ -4748,7 +4998,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
     # ADMIN PANEL: Majburiy obunalar
     # ========================================================================
 
-    if text == "📎 Majburiy obunalar" and cid == ADMIN:
+    if text == "📎 Majburiy obunalar" and is_admin_id(cid):
         sms(
             cid,
             text,
@@ -5120,7 +5370,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         unlink_file(f"user/{cid}.step")
         return
 
-    if data.startswith("task_ok=") and chat_id == ADMIN:
+    if data.startswith("task_ok=") and is_admin_id(chat_id):
         parts = data.split("=")
         u_target, tsk_id = parts[1], parts[2]
         already = database.fetch_one(
@@ -5143,7 +5393,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         sms(u_target, f"🎉 <b>Vazifangiz Admin tomonidan tasdiqlandi!</b>\n💰 Hisobingizga <b>+{fmt_money(rew_val)} so‘m</b> qo‘shildi!")
         return
 
-    if data.startswith("task_no=") and chat_id == ADMIN:
+    if data.startswith("task_no=") and is_admin_id(chat_id):
         parts = data.split("=")
         u_target = parts[1]
         edit(chat_id, message_id, f"❌ Foydalanuvchi ({u_target}) vazifasi rad etildi.")
@@ -5244,12 +5494,12 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         ])
         return txt, kb
 
-    if text == "💵 Pul ishlash sozlamalari" and cid == ADMIN:
+    if text == "💵 Pul ishlash sozlamalari" and is_admin_id(cid):
         p_txt, p_kb = _build_admin_earn_panel()
         sms(cid, p_txt, p_kb)
         return
 
-    if data.startswith("adm_earn=") and chat_id == ADMIN:
+    if data.startswith("adm_earn=") and is_admin_id(chat_id):
         act = data.split("=", 1)[1]
         if act == "home":
             p_txt, p_kb = _build_admin_earn_panel()
@@ -5405,7 +5655,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             edit(chat_id, message_id, p_txt, p_kb)
         return
 
-    if data.startswith("adm_del_ech=") and chat_id == ADMIN:
+    if data.startswith("adm_del_ech=") and is_admin_id(chat_id):
         ch_id = data.split("=", 1)[1]
         database.execute("DELETE FROM `earn_channels` WHERE `id` = ?", (ch_id,))
         bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "🗑️ Kanal o‘chirildi!"})
@@ -5413,7 +5663,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         edit(chat_id, message_id, p_txt, p_kb)
         return
 
-    if data.startswith("adm_del_etsk=") and chat_id == ADMIN:
+    if data.startswith("adm_del_etsk=") and is_admin_id(chat_id):
         t_id = data.split("=", 1)[1]
         database.execute("DELETE FROM `earn_tasks` WHERE `id` = ?", (t_id,))
         bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "🗑️ Vazifa o‘chirildi!"})
@@ -5421,7 +5671,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         edit(chat_id, message_id, p_txt, p_kb)
         return
 
-    if data.startswith("adm_del_prm=") and chat_id == ADMIN:
+    if data.startswith("adm_del_prm=") and is_admin_id(chat_id):
         p_id = data.split("=", 1)[1]
         database.execute("DELETE FROM `promocodes` WHERE `id` = ?", (p_id,))
         bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "🗑️ Promokod o‘chirildi!"})
@@ -5429,7 +5679,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         edit(chat_id, message_id, p_txt, p_kb)
         return
 
-    if step == "adm_set_ref_price" and cid == ADMIN and text:
+    if step == "adm_set_ref_price" and is_admin_id(cid) and text:
         clean_v = text.strip().replace(" ", "")
         if clean_v.replace(".", "", 1).isdigit():
             database.execute("UPDATE `settings` SET `referal` = ? WHERE `id` = 1", (enc("encode", clean_v),))
@@ -5439,7 +5689,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             sms(cid, "⚠️ Faqat raqam kiriting (masalan: 200):", AORT_KB)
         return
 
-    if step == "adm_set_daily_amt" and cid == ADMIN and text:
+    if step == "adm_set_daily_amt" and is_admin_id(cid) and text:
         clean_v = text.strip().replace(" ", "")
         if clean_v.replace(".", "", 1).isdigit():
             put_file("set/daily_bonus.txt", clean_v)
@@ -5449,7 +5699,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             sms(cid, "⚠️ Faqat raqam kiriting (masalan: 100):", AORT_KB)
         return
 
-    if data.startswith("adm_trf=") and chat_id == ADMIN:
+    if data.startswith("adm_trf=") and is_admin_id(chat_id):
         fname = data.split("=", 1)[1]
         put_file("set/tmp_trf_file.txt", fname)
         del_msg(chat_id, message_id)
@@ -5457,7 +5707,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         put_file(f"user/{chat_id}.step", "adm_set_trf_price")
         return
 
-    if step == "adm_set_trf_price" and cid == ADMIN and text:
+    if step == "adm_set_trf_price" and is_admin_id(cid) and text:
         clean_v = text.strip().replace(" ", "")
         fname = get_file("set/tmp_trf_file.txt").strip()
         if clean_v.replace(".", "", 1).isdigit() and fname:
@@ -5468,19 +5718,19 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             sms(cid, "⚠️ Faqat raqam kiriting (masalan: 10000):", AORT_KB)
         return
 
-    if step == "adm_set_earn_header" and cid == ADMIN and text:
+    if step == "adm_set_earn_header" and is_admin_id(cid) and text:
         put_file("set/earn_header.txt", text.strip())
         unlink_file(f"user/{cid}.step")
         sms(cid, "✅ Pul ishlash bo‘limi sarlavha matni yangilandi!", PANEL_KB)
         return
 
-    if step == "adm_set_konkurs_txt" and cid == ADMIN and text:
+    if step == "adm_set_konkurs_txt" and is_admin_id(cid) and text:
         put_file("set/konkurs_text.txt", text.strip())
         unlink_file(f"user/{cid}.step")
         sms(cid, "✅ Konkurs matni va sovrinlari saqlandi!", PANEL_KB)
         return
 
-    if step == "adm_add_earn_ch" and cid == ADMIN and text:
+    if step == "adm_add_earn_ch" and is_admin_id(cid) and text:
         parts = text.strip().split(None, 2)
         if len(parts) >= 2 and parts[1].replace(".", "", 1).isdigit():
             ch_u = parts[0].strip()
@@ -5496,7 +5746,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             sms(cid, "⚠️ Format xato! Namuna: <code>@kanal_user 200 Kanal Nomi</code>", AORT_KB)
         return
 
-    if step == "adm_add_earn_tsk" and cid == ADMIN and text:
+    if step == "adm_add_earn_tsk" and is_admin_id(cid) and text:
         lines = [ln.strip() for ln in text.strip().split("\n") if ln.strip()]
         if len(lines) >= 4 and lines[3].replace(".", "", 1).isdigit():
             v_mode = get_file("set/tmp_tsk_mode.txt").strip() or "auto"
@@ -5510,7 +5760,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             sms(cid, "⚠️ Iltimos, ma'lumotlarni to‘liq 4 qatorda va 4-qatorda faqat raqam bilan yuboring!", AORT_KB)
         return
 
-    if step == "adm_add_promo" and cid == ADMIN and text:
+    if step == "adm_add_promo" and is_admin_id(cid) and text:
         parts = text.strip().split()
         if len(parts) >= 3 and parts[1].replace(".", "", 1).isdigit() and parts[2].isdigit():
             p_code, p_rew, p_lim = parts[0], parts[1], int(parts[2])
@@ -5594,7 +5844,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         put_file(f"user/{cid2}.step", f"ticket={ida}")
         return
 
-    if step.startswith("ticket=") and cid == ADMIN and message:
+    if step.startswith("ticket=") and is_admin_id(cid) and message:
         ida = step.split("=")[1]
         res = bot("copyMessage", {"chat_id": ida, "from_chat_id": ADMIN, "message_id": mid})
         if res.get("ok"):
