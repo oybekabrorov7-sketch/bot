@@ -34,7 +34,7 @@ class Config:
 
     # Telegram Bot sozlamalari (@BotFather dan olingan token va Admin ID)
     BOT_TOKEN = os.getenv("BOT_TOKEN", "8655952088:AAGZq3Z5u-5r9onDaib-KO2K089J4jTHxJc")
-    ADMIN_ID = os.getenv("ADMIN_ID", "7552962971")
+    ADMIN_ID = os.getenv("ADMIN_ID", "6892561572")
     BOT_USERNAME = os.getenv("BOT_USERNAME", "ANTAARAB_SMM_ORG_BOT")
 
 
@@ -1734,10 +1734,27 @@ _JOINCHAT_CACHE: Dict[str, float] = {}
 
 
 # ============================================================================
-# MULTI-ADMIN BOSHQARUV TIZIMI (Admin qo'shish, tekshirish va o'chirish)
+# MULTI-ADMIN VA HUQUQLAR (PERMISSIONS) BOSHQARUV TIZIMI
 # ============================================================================
 _SECONDARY_ADMINS_CACHE: Optional[set] = None
+_ADMIN_PERMS_CACHE: Dict[str, List[str]] = {}
 _ADMINS_LOCK = threading.RLock()
+
+# Admin qila oladigan barcha amallar ro'yxati
+ADMIN_PERMISSIONS_CATALOG: List[Tuple[str, str]] = [
+    ("users", "👤 Foydalanuvchilarni boshqarish (Pul qo‘shish/ayirish/ban)"),
+    ("services", "🛍 Xizmatlar va bo‘limlarni sozlash"),
+    ("payments", "💳 Hamyonlar va to‘lovlarni boshqarish"),
+    ("earn", "💵 Pul ishlash va Server tariflari sozlamalari"),
+    ("broadcast", "🔔 Xabar yuborish (Rassilka)"),
+    ("stats", "📊 Statistika va buyurtmalarni tekshirish"),
+    ("channels", "📎 Majburiy obuna kanallari"),
+    ("api_rates", "🔑 API provayderlar, Kurs va Foiz sozlamalari"),
+    ("texts", "📑 Matnlar va Boshqa sozlamalar"),
+    ("admins", "👑 Admin qo‘shish va huquqlarni boshqarish"),
+]
+ALL_PERM_KEYS: List[str] = [k for k, _ in ADMIN_PERMISSIONS_CATALOG]
+PERM_LABELS_MAP: Dict[str, str] = {k: v for k, v in ADMIN_PERMISSIONS_CATALOG}
 
 
 def get_secondary_admins() -> List[str]:
@@ -1745,8 +1762,17 @@ def get_secondary_admins() -> List[str]:
     global _SECONDARY_ADMINS_CACHE
     with _ADMINS_LOCK:
         try:
-            rows = database.fetch_all("SELECT `user_id` FROM `admins`")
-            res = [str(r["user_id"]).strip() for r in rows if str(r["user_id"]).strip()]
+            rows = database.fetch_all("SELECT `user_id`, `role` FROM `admins`")
+            res = []
+            for r in rows:
+                uid_s = str(r["user_id"]).strip()
+                if uid_s:
+                    res.append(uid_s)
+                    role_raw = str(r.get("role") or "").strip()
+                    if role_raw and role_raw != "admin":
+                        _ADMIN_PERMS_CACHE[uid_s] = [p.strip() for p in role_raw.split(",") if p.strip()]
+                    elif uid_s not in _ADMIN_PERMS_CACHE:
+                        _ADMIN_PERMS_CACHE[uid_s] = list(ALL_PERM_KEYS)
             _SECONDARY_ADMINS_CACHE = set(res)
             return res
         except Exception:
@@ -1770,21 +1796,71 @@ def is_admin_id(uid: Union[str, int, None]) -> bool:
         return bool(_SECONDARY_ADMINS_CACHE and u_str in _SECONDARY_ADMINS_CACHE)
 
 
-def add_secondary_admin(uid: Union[str, int], added_by: str = "") -> bool:
-    """Yangi admin qo'shadi (baza va keshga saqlaydi)."""
+def get_admin_perms(uid: Union[str, int, None]) -> List[str]:
+    """Adminning ruxsat etilgan huquqlari ro'yxatini qaytaradi."""
+    if not uid:
+        return []
+    u_str = str(uid).strip()
+    if u_str == ADMIN:
+        return list(ALL_PERM_KEYS)
+    if not is_admin_id(u_str):
+        return []
+    with _ADMINS_LOCK:
+        if u_str in _ADMIN_PERMS_CACHE:
+            return list(_ADMIN_PERMS_CACHE[u_str])
+        saved_p = get_file(f"set/admin_perms_{u_str}.txt").strip()
+        if saved_p:
+            perms = [p.strip() for p in saved_p.split(",") if p.strip()]
+            _ADMIN_PERMS_CACHE[u_str] = perms
+            return perms
+        row = database.fetch_one("SELECT `role` FROM `admins` WHERE `user_id` = ?", (u_str,))
+        if row and row.get("role") and row["role"] != "admin":
+            perms = [p.strip() for p in str(row["role"]).split(",") if p.strip()]
+            _ADMIN_PERMS_CACHE[u_str] = perms
+            return perms
+        return list(ALL_PERM_KEYS)
+
+
+def get_admin_custom_note(uid: Union[str, int]) -> str:
+    """Admin uchun kiritilgan maxsus vazifa/huquq izohini qaytaradi."""
+    return get_file(f"set/admin_note_{str(uid).strip()}.txt").strip()
+
+
+def set_admin_custom_note(uid: Union[str, int], note: str) -> None:
+    put_file(f"set/admin_note_{str(uid).strip()}.txt", note.strip())
+
+
+def has_admin_perm(uid: Union[str, int, None], perm_key: str) -> bool:
+    """Adminda ma'lum bir bo'limni boshqarish huquqi bor-yo'qligini tekshiradi."""
+    if not uid:
+        return False
+    u_str = str(uid).strip()
+    if u_str == ADMIN:
+        return True
+    if not is_admin_id(u_str):
+        return False
+    perms = get_admin_perms(u_str)
+    return ("all" in perms) or (perm_key in perms)
+
+
+def add_secondary_admin(uid: Union[str, int], added_by: str = "", perms: Optional[List[str]] = None) -> bool:
+    """Yangi admin qo'shadi yoki uning huquqlarini yangilaydi."""
     u_str = str(uid).strip()
     if not u_str or u_str == ADMIN:
         return False
+    final_perms = list(perms) if perms is not None else list(ALL_PERM_KEYS)
+    perms_csv = ",".join(final_perms)
     now_str = datetime.datetime.now().strftime("%Y.%m.%d %H:%M")
     try:
         database.execute(
             """INSERT INTO `admins` (`user_id`, `role`, `added_by`, `added_at`)
-            VALUES (?, 'admin', ?, ?)
-            ON CONFLICT(`user_id`) DO UPDATE SET `role` = 'admin', `added_at` = ?""",
-            (u_str, str(added_by), now_str, now_str),
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(`user_id`) DO UPDATE SET `role` = ?, `added_at` = ?""",
+            (u_str, perms_csv, str(added_by), now_str, perms_csv, now_str),
         )
     except Exception:
         pass
+    put_file(f"set/admin_perms_{u_str}.txt", perms_csv)
     cur_admins = get_secondary_admins()
     if u_str not in cur_admins:
         cur_admins.append(u_str)
@@ -1792,6 +1868,7 @@ def add_secondary_admin(uid: Union[str, int], added_by: str = "") -> bool:
     with _ADMINS_LOCK:
         if _SECONDARY_ADMINS_CACHE is not None:
             _SECONDARY_ADMINS_CACHE.add(u_str)
+        _ADMIN_PERMS_CACHE[u_str] = final_perms
     return True
 
 
@@ -1804,11 +1881,14 @@ def remove_secondary_admin(uid: Union[str, int]) -> bool:
         database.execute("DELETE FROM `admins` WHERE `user_id` = ?", (u_str,))
     except Exception:
         pass
+    unlink_file(f"set/admin_perms_{u_str}.txt")
+    unlink_file(f"set/admin_note_{u_str}.txt")
     cur_admins = [a for a in get_secondary_admins() if a != u_str]
     put_file("set/admins.txt", "\n".join(cur_admins))
     with _ADMINS_LOCK:
         if _SECONDARY_ADMINS_CACHE is not None:
             _SECONDARY_ADMINS_CACHE.discard(u_str)
+        _ADMIN_PERMS_CACHE.pop(u_str, None)
     return True
 
 
@@ -1900,6 +1980,77 @@ PANEL_KB = reply_keyboard([
     [{"text": "🇺🇿 Valyuta kursi"}, {"text": "⏰ Cron sozlamasi"}],
     [{"text": "⏪ Orqaga"}],
 ])
+
+
+def get_dynamic_panel_kb(uid: Union[str, int, None]) -> str:
+    """Adminga faqat o'ziga ruxsat berilgan bo'lim tugmalarini ko'rsatadi."""
+    if str(uid) == ADMIN:
+        return PANEL_KB
+    rows: List[List[Dict[str, str]]] = []
+    r1: List[Dict[str, str]] = []
+    if any(has_admin_perm(uid, p) for p in ("services", "api_rates", "channels", "texts", "stats")):
+        r1.append({"text": "⚙️ Asosiy sozlamalar"})
+    if has_admin_perm(uid, "payments"):
+        r1.append({"text": "💳 Hamyonlar sozlamalari"})
+    if r1:
+        rows.append(r1)
+
+    r2: List[Dict[str, str]] = []
+    if has_admin_perm(uid, "earn"):
+        r2.append({"text": "💵 Pul ishlash sozlamalari"})
+    if has_admin_perm(uid, "admins"):
+        r2.append({"text": "👑 Admin qo‘shish"})
+    if r2:
+        rows.append(r2)
+
+    r3: List[Dict[str, str]] = []
+    if has_admin_perm(uid, "broadcast"):
+        r3.append({"text": "🔔 Xabar yuborish"})
+    if has_admin_perm(uid, "stats"):
+        r3.append({"text": "📊 Statistika"})
+    if r3:
+        rows.append(r3)
+
+    if has_admin_perm(uid, "users"):
+        rows.append([{"text": "👤 Foydalanuvchini boshqarish"}])
+
+    r5: List[Dict[str, str]] = []
+    if has_admin_perm(uid, "api_rates"):
+        r5.append({"text": "🇺🇿 Valyuta kursi"})
+        r5.append({"text": "⏰ Cron sozlamasi"})
+    if r5:
+        rows.append(r5)
+
+    rows.append([{"text": "⏪ Orqaga"}])
+    return reply_keyboard(rows)
+
+
+def get_dynamic_panel2_kb(uid: Union[str, int, None]) -> str:
+    """Ichki sozlamalar menyusida ham faqat ruxsat berilgan tugmalarni chiqaradi."""
+    if str(uid) == ADMIN:
+        return PANEL2_KB
+    rows: List[List[Dict[str, str]]] = []
+    if has_admin_perm(uid, "services"):
+        rows.append([{"text": "🛍 Buyurtmalarni sozlash"}])
+    r2: List[Dict[str, str]] = []
+    if has_admin_perm(uid, "api_rates"):
+        r2.append({"text": "💵 Kursni o‘rnatish"})
+        r2.append({"text": "⚖️ Foizni o‘rnatish"})
+    if r2:
+        rows.append(r2)
+    if has_admin_perm(uid, "stats"):
+        rows.append([{"text": "📊 Buyurtmani tekshirish"}])
+    r4: List[Dict[str, str]] = []
+    if has_admin_perm(uid, "channels"):
+        r4.append({"text": "📎 Majburiy obunalar"})
+    if has_admin_perm(uid, "api_rates"):
+        r4.append({"text": "🔑 API Sozlamalari"})
+    if r4:
+        rows.append(r4)
+    if has_admin_perm(uid, "texts") or has_admin_perm(uid, "payments") or has_admin_perm(uid, "earn"):
+        rows.append([{"text": "⚙️ Boshqa sozlamalar"}])
+    rows.append([{"text": "🗄️ Boshqaruv"}])
+    return reply_keyboard(rows)
 
 PANEL2_KB = reply_keyboard([
     [{"text": "🛍 Buyurtmalarni sozlash"}],
@@ -2591,10 +2742,21 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
     is_admin = is_admin_id(cid) or is_admin_id(chat_id)
     m_kb = MENU_ADMIN_KB if is_admin else MENU_USER_KB
 
+    def _require_perm(target_u: str, perm_key: str) -> bool:
+        if not is_admin_id(target_u):
+            return False
+        if has_admin_perm(target_u, perm_key):
+            return True
+        p_title = PERM_LABELS_MAP.get(perm_key, perm_key)
+        sms(target_u, f"⛔️ <b>Ruxsat yo‘q!</b>\n\nSizga «<b>{p_title}</b>» bo‘limini boshqarish huquqi berilmagan.", get_dynamic_panel_kb(target_u))
+        return False
+
     # /admin yoki Boshqaruv tugmasi bosilganda
     if text in ("/admin", "/panel", "🗄️ Boshqaruv"):
         if is_admin_id(cid):
-            sms(cid, "🖥️ Boshqaruv paneli", PANEL_KB)
+            note_txt = get_admin_custom_note(cid)
+            role_line = f"\n📌 <i>Vazifangiz: {note_txt}</i>" if note_txt and cid != ADMIN else ""
+            sms(cid, f"🖥️ <b>Boshqaruv paneli</b>{role_line}", get_dynamic_panel_kb(cid))
             unlink_file(f"user/{cid}.step")
         else:
             sms(cid, f"⚠️ Siz Admin emassiz.\nSizning Telegram ID raqamingiz: <code>{cid}</code>\n(Admin bo'lish uchun Asosiy Admin sizni Admin qilib tayinlashi kerak).")
@@ -2670,7 +2832,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         return
 
     if text == "⚙️ Asosiy sozlamalar" and is_admin_id(cid):
-        sms(cid, text, PANEL2_KB)
+        sms(cid, text, get_dynamic_panel2_kb(cid))
         return
 
     if text == "/start" and joinchat(cid):
@@ -2706,7 +2868,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         sms(chat_id, "🖥️ Asosiy menyudasiz", m_kb)
         return
 
-    if text == "⏰ Cron sozlamasi" and is_admin_id(cid):
+    if text == "⏰ Cron sozlamasi" and _require_perm(cid, "api_rates"):
         sms(
             cid,
             f"📝 Quyidagi manzillarni cron qiling\n"
@@ -2717,7 +2879,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         )
         return
 
-    if text == "📊 Statistika" and is_admin_id(cid):
+    if text == "📊 Statistika" and _require_perm(cid, "stats"):
         st = _get_order_And_user_stats()
         sms(
             cid,
@@ -2831,7 +2993,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             sms(cid2, "✅ Jarayon tugallandi.")
         return
 
-    if text == "🔔 Xabar yuborish" and is_admin_id(cid):
+    if text == "🔔 Xabar yuborish" and _require_perm(cid, "broadcast"):
         row = database.fetch_one("SELECT * FROM `send` LIMIT 1")
         if not row:
             sms(cid, "<b>📤 Foydalanuvchilarga yuboriladigan xabarni botga yuboring!</b>", AORT_KB)
@@ -2871,7 +3033,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
     # ADMIN PANEL: Boshqa sozlamalar (Matnlar, Hamyonlar, Avto to'lov, Referal)
     # ========================================================================
 
-    if text == "💳 Hamyonlar sozlamalari" and is_admin_id(cid):
+    if text == "💳 Hamyonlar sozlamalari" and _require_perm(cid, "payments"):
         delturi = get_file("set/payments.txt")
         lines = [ln.strip() for ln in delturi.split("\n") if ln.strip()]
         kb_rows = [[{"text": f"🗑️ {title} - ni o'chirish", "callback_data": f"delPayMethod-{title}"}] for title in lines]
@@ -2880,7 +3042,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         sms(cid, "<b>💳 To'lov tizimlari va kartalar sozlamalari:</b>", keyboard(kb_rows))
         return
 
-    if text == "⚙️ Boshqa sozlamalar" and is_admin_id(cid):
+    if text == "⚙️ Boshqa sozlamalar" and _require_perm(cid, "texts"):
         sms(
             cid,
             "⭐ Kerakli bo'limni tanlang:",
@@ -3124,7 +3286,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
     # ADMIN PANEL: Buyurtmani tekshirish va API Sozlamalari (Provayderlar)
     # ========================================================================
 
-    if text == "📊 Buyurtmani tekshirish" and joinchat(cid):
+    if text == "📊 Buyurtmani tekshirish" and _require_perm(cid, "stats"):
         stati = database.count_rows("orders")
         sms(cid, f"🔢 Barcha buyurtmalar: {stati} ta\n\n➡️ Buyurtma IDsini kiriting:", AORT_KB)
         put_file(f"user/{cid}.step", "orders2")
@@ -3152,7 +3314,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             unlink_file(f"user/{cid}.step")
         return
 
-    if (text == "🔑 API Sozlamalari" and is_admin_id(cid)) or data == "api1":
+    if (text == "🔑 API Sozlamalari" and _require_perm(cid, "api_rates")) or (data == "api1" and has_admin_perm(chat_id, "api_rates")):
         target_chat = cid if text else chat_id
         if data == "api1":
             del_msg(chat_id, message_id)
@@ -3952,7 +4114,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
     # ADMIN PANEL: Bo'limlar, Ichki bo'limlar va Xizmatlarni sozlash
     # ========================================================================
 
-    if (text == "🛍 Buyurtmalarni sozlash" and is_admin_id(cid)) or data == "xsetting":
+    if (text == "🛍 Buyurtmalarni sozlash" and _require_perm(cid, "services")) or (data == "xsetting" and has_admin_perm(chat_id, "services")):
         target = ADMIN if text else chat_id
         if data == "xsetting":
             del_msg(chat_id, message_id)
@@ -4672,7 +4834,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
     # ADMIN PANEL: Kurs, Foiz, Foydalanuvchini boshqarish, Valyuta kursi
     # ========================================================================
 
-    if text == "💵 Kursni o‘rnatish" and is_admin_id(cid):
+    if text == "💵 Kursni o‘rnatish" and _require_perm(cid, "api_rates"):
         r_usd = get_file("set/usd").strip() or "0"
         r_rub = get_file("set/rub").strip() or "0"
         r_inr = get_file("set/inr").strip() or "0"
@@ -4708,7 +4870,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             sms(cid, "⚠️ Faqat raqam kiriting (masalan: <code>12800</code>):", AORT_KB)
         return
 
-    if text == "⚖️ Foizni o‘rnatish" and is_admin_id(cid):
+    if text == "⚖️ Foizni o‘rnatish" and _require_perm(cid, "api_rates"):
         p_row = database.fetch_one("SELECT * FROM `percent` WHERE `id` = 1")
         cur_p = p_row["percent"] if p_row else "0"
         sms(cid, f"⭐ Bot xizmatlari uchun foizni kiriting\n\n♻️ Joriy foiz: {cur_p}%", AORT_KB)
@@ -4723,36 +4885,97 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
 
     
     # ========================================================================
-    # ADMIN PANEL: 👑 ADMIN QO'SHISH VA ADMINLAR BOSHQARUVI
+    # ADMIN PANEL: 👑 ADMIN QO'SHISH VA UNING HUQUQLARINI (NIMA QILA OLISHINI) BELGILASH
     # ========================================================================
 
     def _build_admin_manager_view() -> Tuple[str, str]:
         sec_admins = get_secondary_admins()
         lines = [
-            "👑 <b>Adminlar Boshqaruvi Paneli</b>\n",
-            f"⭐️ <b>Asosiy Admin (Ega):</b>\n• <code>{ADMIN}</code>\n",
+            "👑 <b>Adminlar va Huquqlar Boshqaruvi</b>\n",
+            f"⭐️ <b>Asosiy Admin (Ega):</b> <code>{ADMIN}</code> (Barcha huquqlar)\n",
         ]
         if sec_admins:
             lines.append(f"👥 <b>Tayinlangan Adminlar ({len(sec_admins)} ta):</b>")
             for i, a_id in enumerate(sec_admins, 1):
-                u_row = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (a_id,))
-                a_name = u_row.get("name", "") if u_row else ""
-                a_label = f" ({a_name})" if a_name else ""
-                lines.append(f"<b>{i}.</b> <a href='tg://user?id={a_id}'>{a_id}</a>{a_label}")
+                perms = get_admin_perms(a_id)
+                note = get_admin_custom_note(a_id)
+                p_count = len(perms)
+                note_str = f" | 📝 <i>{note}</i>" if note else ""
+                lines.append(
+                    f"<b>{i}.</b> <a href='tg://user?id={a_id}'>{a_id}</a> — "
+                    f"🔐 <b>{p_count}/{len(ALL_PERM_KEYS)} ta huquq</b>{note_str}"
+                )
         else:
             lines.append("👥 <b>Tayinlangan Adminlar:</b>\n<i>Hozircha qo‘shimcha adminlar tayinlanmagan.</i>")
 
-        lines.append("\n👇 <i>Admin qo‘shish yoki o‘chirish uchun quyidagi tugmalardan birini tanlang:</i>")
+        lines.append("\n👇 <i>Yangi admin qo‘shish, uning nima qila olishini (huquqlarini) belgilash yoki o‘chirish uchun tanlang:</i>")
 
         kb_rows = [
-            [{"text": "➕ Yangi admin qo‘shish", "callback_data": "adm_mgr=add"}],
+            [{"text": "➕ Yangi admin qo‘shish (Huquqlari bilan)", "callback_data": "adm_mgr=add"}],
         ]
         if sec_admins:
-            kb_rows.append([{"text": f"🗑️ Adminni o‘chirish ({len(sec_admins)} ta)", "callback_data": "adm_mgr=del_menu"}])
+            for a_id in sec_admins:
+                kb_rows.append([
+                    {"text": f"⚙️ Huquqlar ({a_id})", "callback_data": f"adm_perm_open={a_id}"},
+                    {"text": f"🗑️ O‘chirish ({a_id})", "callback_data": f"adm_del_do={a_id}"},
+                ])
         kb_rows.append([{"text": "🔄 Ro‘yxatni yangilash", "callback_data": "adm_mgr=refresh"}])
         return "\n".join(lines), keyboard(kb_rows)
 
+    def _get_draft_perms(target_uid: str) -> List[str]:
+        raw = get_file(f"set/draft_perms_{target_uid}.txt").strip()
+        if raw == "NONE":
+            return []
+        if raw:
+            return [p.strip() for p in raw.split(",") if p.strip()]
+        if is_admin_id(target_uid):
+            return get_admin_perms(target_uid)
+        # Default starting selection when adding a new admin: users & stats
+        return ["users", "stats"]
+
+    def _save_draft_perms(target_uid: str, perms_list: List[str]) -> None:
+        if not perms_list:
+            put_file(f"set/draft_perms_{target_uid}.txt", "NONE")
+        else:
+            put_file(f"set/draft_perms_{target_uid}.txt", ",".join(perms_list))
+
+    def _build_perm_selector_view(target_uid: str) -> Tuple[str, str]:
+        cur_perms = _get_draft_perms(target_uid)
+        custom_note = get_admin_custom_note(target_uid)
+        lines = [
+            f"👑 <b>Admin (<code>{target_uid}</code>) nima qila olishini belgilang:</b>\n",
+            "<i>Quyidagi tugmalarni bosib, ushbu adminga ruxsat beriladigan bo‘limlarni yoqing (✅) yoki o‘chiring (❌).</i>",
+            "<i>Shuningdek, shu yerning o‘zida admin vazifasi haqida matn yozib yuborishingiz yoki raqamlarni (masalan: <code>1 2 3</code>) yuborishingiz mumkin:</i>\n",
+        ]
+        kb_rows: List[List[Dict[str, str]]] = []
+        for idx, (p_key, p_label) in enumerate(ADMIN_PERMISSIONS_CATALOG, 1):
+            enabled = p_key in cur_perms
+            icon = "✅" if enabled else "❌"
+            lines.append(f"<b>{idx}.</b> {icon} {p_label}")
+            kb_rows.append([
+                {"text": f"{icon} {idx}. {p_label}", "callback_data": f"adm_perm_tog={target_uid}={p_key}"}
+            ])
+
+        if custom_note:
+            lines.append(f"\n📝 <b>Kiritilgan vazifa/izoh:</b> <i>{custom_note}</i>")
+
+        kb_rows.append([
+            {"text": "✅ Hammasini yoqish", "callback_data": f"adm_perm_all={target_uid}=on"},
+            {"text": "❌ Hammasini o‘chirish", "callback_data": f"adm_perm_all={target_uid}=off"},
+        ])
+        kb_rows.append([
+            {"text": "💾 Saqlash va Adminni tasdiqlash", "callback_data": f"adm_perm_save={target_uid}"}
+        ])
+        kb_rows.append([
+            {"text": "⬅️ Bekor qilish / Orqaga", "callback_data": "adm_mgr=menu"}
+        ])
+        return "\n".join(lines), keyboard(kb_rows)
+
     if (text in ("👑 Admin qo‘shish", "/addadmin") or data == "adm_mgr=menu") and is_admin_id(cid or chat_id):
+        actor_id = cid or chat_id
+        if not _require_perm(actor_id, "admins"):
+            return
+        unlink_file(f"user/{actor_id}.step")
         m_txt, m_kb_json = _build_admin_manager_view()
         if data == "adm_mgr=menu":
             edit(chat_id, message_id, m_txt, m_kb_json)
@@ -4761,6 +4984,8 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         return
 
     if data.startswith("adm_mgr=") and is_admin_id(chat_id):
+        if not _require_perm(chat_id, "admins"):
+            return
         act = data.split("=", 1)[1]
         if act == "refresh":
             m_txt, m_kb_json = _build_admin_manager_view()
@@ -4770,69 +4995,155 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             del_msg(chat_id, message_id)
             sms(
                 chat_id,
-                "👑 <b>Yangi Admin Tayinlash</b>\n\n"
+                "👑 <b>Yangi Admin Qo‘shish (1/2 qadam)</b>\n\n"
                 "Admin qilmoqchi bo‘lgan foydalanuvchining <b>Telegram ID</b> raqamini yuboring:\n\n"
-                "<i>Namuna:</i> <code>1234567890</code>",
+                "<i>Namuna:</i> <code>1234567890</code>\n"
+                "<i>(Keyingi qadamda u admin nima qila olishini — huquqlarini belgilaysiz)</i>",
                 AORT_KB,
             )
             put_file(f"user/{chat_id}.step", "adm_add_admin_step")
-        elif act == "del_menu":
-            sec_admins = get_secondary_admins()
-            if not sec_admins:
-                bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "Hozircha o‘chiradigan adminlar yo‘q!", "show_alert": True})
-                return
-            kb_rows = []
-            for a_id in sec_admins:
-                u_row = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (a_id,))
-                a_name = u_row.get("name", "") if u_row else f"ID: {a_id}"
-                kb_rows.append([{"text": f"🗑️ {a_name} ({a_id}) — O‘chirish", "callback_data": f"adm_del_do={a_id}"}])
-            kb_rows.append([{"text": "⬅️ Orqaga", "callback_data": "adm_mgr=menu"}])
-            edit(chat_id, message_id, "🗑️ <b>Adminlikdan olmoqchi bo‘lgan adminni tanlang:</b>", keyboard(kb_rows))
         return
 
     if step == "adm_add_admin_step" and is_admin_id(cid) and text:
+        if not _require_perm(cid, "admins"):
+            return
         clean_id = text.strip()
         if not clean_id.isdigit():
             sms(cid, "⚠️ <b>Faqat raqamlardan iborat Telegram ID kiriting!</b>\nQaytadan kiriting:", AORT_KB)
             return
         if clean_id == ADMIN:
-            sms(cid, "⚠️ <b>Bu raqam botning Asosiy Admini (Ega)!</b>", PANEL_KB)
-            unlink_file(f"user/{cid}.step")
-            return
-        if is_admin_id(clean_id):
-            sms(cid, f"⚠️ <b>Foydalanuvchi (ID: <code>{clean_id}</code>) allaqachon Admin!</b>", PANEL_KB)
+            sms(cid, "⚠️ <b>Bu raqam botning Asosiy Admini (Ega)!</b>", get_dynamic_panel_kb(cid))
             unlink_file(f"user/{cid}.step")
             return
 
-        chat_info = bot("getChat", {"chat_id": clean_id})
-        first_name = ""
-        uname = ""
-        if chat_info.get("ok") and isinstance(chat_info.get("result"), dict):
-            first_name = chat_info["result"].get("first_name", "")
-            uname = chat_info["result"].get("username", "")
+        # 2-qadam: Admin nima qila olishini (huquqlarini) kiritish/tanlash oynasini ochamiz!
+        _save_draft_perms(clean_id, get_admin_perms(clean_id) if is_admin_id(clean_id) else ["users", "stats"])
+        put_file(f"user/{cid}.step", f"adm_perm_input={clean_id}")
+        p_txt, p_kb = _build_perm_selector_view(clean_id)
+        sms(cid, p_txt, p_kb)
+        return
 
-        add_secondary_admin(clean_id, added_by=cid)
-        unlink_file(f"user/{cid}.step")
+    if data.startswith("adm_perm_open=") and is_admin_id(chat_id):
+        if not _require_perm(chat_id, "admins"):
+            return
+        target_uid = data.split("=", 1)[1].strip()
+        _save_draft_perms(target_uid, get_admin_perms(target_uid))
+        put_file(f"user/{chat_id}.step", f"adm_perm_input={target_uid}")
+        p_txt, p_kb = _build_perm_selector_view(target_uid)
+        edit(chat_id, message_id, p_txt, p_kb)
+        return
 
-        # Notify the new admin
+    if data.startswith("adm_perm_tog=") and is_admin_id(chat_id):
+        if not _require_perm(chat_id, "admins"):
+            return
+        parts = data.split("=")
+        target_uid, p_key = parts[1], parts[2]
+        cur_p = _get_draft_perms(target_uid)
+        if p_key in cur_p:
+            cur_p = [x for x in cur_p if x != p_key]
+        else:
+            cur_p.append(p_key)
+        _save_draft_perms(target_uid, cur_p)
+        p_txt, p_kb = _build_perm_selector_view(target_uid)
+        edit(chat_id, message_id, p_txt, p_kb)
+        return
+
+    if data.startswith("adm_perm_all=") and is_admin_id(chat_id):
+        if not _require_perm(chat_id, "admins"):
+            return
+        parts = data.split("=")
+        target_uid, mode = parts[1], parts[2]
+        _save_draft_perms(target_uid, list(ALL_PERM_KEYS) if mode == "on" else [])
+        p_txt, p_kb = _build_perm_selector_view(target_uid)
+        edit(chat_id, message_id, p_txt, p_kb)
+        return
+
+    # Agar Admin huquq tanlash bosqichida matn yoki raqamlar yozib yuborsa (masalan: "1 2 3" yoki "Faqat pul qo'shish va xizmat qo'shish")
+    if step.startswith("adm_perm_input=") and is_admin_id(cid) and text:
+        target_uid = step.split("=", 1)[1].strip()
+        raw_in = text.strip()
+        # Agar raqamlar yozilgan bo'lsa (masalan: "1 2 4" yoki "1,2,3")
+        nums = [int(n) for n in re.findall(r"\b([1-9]|10)\b", raw_in)]
+        cur_p = _get_draft_perms(target_uid)
+        if nums and all(c.isdigit() or c in " ,.-+" for c in raw_in):
+            selected_keys = []
+            for n in nums:
+                if 1 <= n <= len(ADMIN_PERMISSIONS_CATALOG):
+                    k = ADMIN_PERMISSIONS_CATALOG[n - 1][0]
+                    if k not in selected_keys:
+                        selected_keys.append(k)
+            _save_draft_perms(target_uid, selected_keys)
+        else:
+            # Kalit so'zlar bo'yicha avtomatik tushunish + izoh sifatida saqlash
+            low = raw_in.lower()
+            matched_keys = list(cur_p)
+            keyword_map = {
+                "users": ("foydalanuvchi", "pul", "balans", "ban", "hisob"),
+                "services": ("xizmat", "bo'lim", "bolim", "buyurtma sozlash", "narx"),
+                "payments": ("karta", "hamyon", "to'lov", "tolov", "payme", "chek"),
+                "earn": ("pul ishlash", "referal", "konkurs", "promokod", "vazifa", "tarif"),
+                "broadcast": ("xabar", "rassilka", "elon", "e'lon"),
+                "stats": ("statistika", "tekshirish"),
+                "channels": ("kanal", "obuna"),
+                "api_rates": ("api", "kurs", "foiz", "valyuta"),
+                "texts": ("matn", "start"),
+                "admins": ("admin",),
+            }
+            found_any_kw = False
+            detected_from_text: List[str] = []
+            for k, kw_tuple in keyword_map.items():
+                if any(w in low for w in kw_tuple):
+                    found_any_kw = True
+                    detected_from_text.append(k)
+            if found_any_kw:
+                _save_draft_perms(target_uid, detected_from_text)
+            set_admin_custom_note(target_uid, raw_in)
+
+        p_txt, p_kb = _build_perm_selector_view(target_uid)
+        sms(cid, "✅ <b>Kiritgan huquqlaringiz belgilandi!</b>\nTekshirib «💾 Saqlash va Adminni tasdiqlash» tugmasini bosing:\n\n" + p_txt, p_kb)
+        return
+
+    if data.startswith("adm_perm_save=") and is_admin_id(chat_id):
+        if not _require_perm(chat_id, "admins"):
+            return
+        target_uid = data.split("=", 1)[1].strip()
+        final_perms = _get_draft_perms(target_uid)
+        if not final_perms:
+            bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "⚠️ Kamida 1 ta huquqni (✅) tanlang!", "show_alert": True})
+            return
+
+        add_secondary_admin(target_uid, added_by=chat_id, perms=final_perms)
+        unlink_file(f"set/draft_perms_{target_uid}.txt")
+        unlink_file(f"user/{chat_id}.step")
+
+        granted_titles = [f"• {PERM_LABELS_MAP[k]}" for k in final_perms if k in PERM_LABELS_MAP]
+        note_txt = get_admin_custom_note(target_uid)
+        note_block = f"\n📝 <b>Maxsus vazifangiz:</b> <i>{note_txt}</i>\n" if note_txt else ""
+
+        # Notify the new/updated admin with their exact permissions list!
         sms(
-            clean_id,
+            target_uid,
             "🎉 <b>Tabriklaymiz! Siz ushbu botda Admin etib tayinlandingiz!</b>\n\n"
-            "Sizga barcha boshqaruv huquqlari berildi.\n"
+            "🔐 <b>Sizga ruxsat berilgan vakolatlar (nima qila olishingiz):</b>\n"
+            + "\n".join(granted_titles)
+            + f"{note_block}\n\n"
             "👉 <b>/admin</b> yoki <b>🗄️ Boshqaruv</b> buyrug‘i orqali Boshqaruv paneliga kirishingiz mumkin.",
             MENU_ADMIN_KB,
         )
 
-        name_display = f" ({first_name})" if first_name else (f" (@{uname})" if uname else "")
-        sms(
-            cid,
-            f"✅ <b>Foydalanuvchi (<code>{clean_id}</code>{name_display}) muvaffaqiyatli Admin etib tayinlandi!</b>\n\n"
-            f"Unga barcha admin huquqlari berildi va bildirishnoma yuborildi.",
-            PANEL_KB,
+        bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "✅ Admin va uning huquqlari saqlandi!", "show_alert": True})
+        m_txt, m_kb_json = _build_admin_manager_view()
+        edit(
+            chat_id,
+            message_id,
+            f"✅ <b>Admin (<code>{target_uid}</code>) uchun {len(final_perms)} ta huquq saqlandi!</b>\n\n" + m_txt,
+            m_kb_json,
         )
         return
 
     if data.startswith("adm_del_do=") and is_admin_id(chat_id):
+        if not _require_perm(chat_id, "admins"):
+            return
         target_uid = data.split("=", 1)[1].strip()
         if target_uid == ADMIN:
             bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "Asosiy Adminni o‘chirib bo‘lmaydi!", "show_alert": True})
@@ -4845,6 +5156,8 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         return
 
     if data.startswith("toggle_adm=") and is_admin_id(chat_id):
+        if not _require_perm(chat_id, "admins"):
+            return
         target_uid = data.split("=", 1)[1].strip()
         if target_uid == ADMIN:
             bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "Asosiy Adminni o‘zgartirib bo‘lmaydi!", "show_alert": True})
@@ -4853,38 +5166,31 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             remove_secondary_admin(target_uid)
             sms(target_uid, "⚠️ <b>Sizning adminlik huquqingiz bekor qilindi.</b>", MENU_USER_KB)
             bot("answerCallbackQuery", {"callback_query_id": cqid, "text": f"👑 Foydalanuvchi ({target_uid}) adminlikdan olindi!", "show_alert": True})
+            rew = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (target_uid,))
+            if rew:
+                pul = rew.get("balance", "0")
+                bans = "🔔 Banlash" if rew.get("status") == "active" else "🔕 Bandan olish"
+                edit(
+                    chat_id,
+                    message_id,
+                    f"<b>Foydalanuvchi ma'lumotlari:</b>\n\nID: <a href='tg://user?id={target_uid}'>{target_uid}</a>\n"
+                    f"Balans: {pul} so‘m\nHolat: <b>👤 Oddiy foydalanuvchi</b>",
+                    keyboard([
+                        [{"text": bans, "callback_data": "ban"}],
+                        [{"text": "➕ Pul qo'shish", "callback_data": "plus"}, {"text": "➖ Pul ayirish", "callback_data": "minus"}],
+                        [{"text": "👑 Admin qilish (Huquqlarni tanlash)", "callback_data": f"adm_perm_open={target_uid}"}],
+                    ]),
+                )
         else:
-            add_secondary_admin(target_uid, added_by=chat_id)
-            sms(
-                target_uid,
-                "🎉 <b>Tabriklaymiz! Siz ushbu botda Admin etib tayinlandingiz!</b>\n\n"
-                "Boshqaruv paneliga kirish uchun <b>/admin</b> buyrug‘ini bosing.",
-                MENU_ADMIN_KB,
-            )
-            bot("answerCallbackQuery", {"callback_query_id": cqid, "text": f"✅ Foydalanuvchi ({target_uid}) Admin etib tayinlandi!", "show_alert": True})
-
-        # Re-render user management card
-        rew = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (target_uid,))
-        if rew:
-            pul = rew.get("balance", "0")
-            bans = "🔔 Banlash" if rew.get("status") == "active" else "🔕 Bandan olish"
-            is_sub = is_admin_id(target_uid)
-            adm_btn_text = "👑 Adminlikdan olish" if is_sub else "👑 Admin qilish"
-            edit(
-                chat_id,
-                message_id,
-                f"<b>Foydalanuvchi ma'lumotlari:</b>\n\nID: <a href='tg://user?id={target_uid}'>{target_uid}</a>\n"
-                f"Balans: {pul} so‘m\nHolat: <b>{'👑 Admin' if is_sub else '👤 Oddiy foydalanuvchi'}</b>",
-                keyboard([
-                    [{"text": bans, "callback_data": "ban"}],
-                    [{"text": "➕ Pul qo'shish", "callback_data": "plus"}, {"text": "➖ Pul ayirish", "callback_data": "minus"}],
-                    [{"text": adm_btn_text, "callback_data": f"toggle_adm={target_uid}"}],
-                ]),
-            )
+            # Open the interactive permission selector so Admin chooses what this new admin can do!
+            _save_draft_perms(target_uid, ["users", "stats"])
+            put_file(f"user/{chat_id}.step", f"adm_perm_input={target_uid}")
+            p_txt, p_kb = _build_perm_selector_view(target_uid)
+            edit(chat_id, message_id, p_txt, p_kb)
         return
 
 
-    if text == "👤 Foydalanuvchini boshqarish" and is_admin_id(cid):
+    if text == "👤 Foydalanuvchini boshqarish" and _require_perm(cid, "users"):
         sms(cid, "<b>Kerakli foydalanuvchining ID raqamini kiriting:</b>", AORT_KB)
         put_file(f"user/{cid}.step", "iD")
         return
@@ -4977,7 +5283,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             bot("answerCallbackQuery", {"callback_query_id": qid, "text": "Bloklash mumkin emas!", "show_alert": True})
         return
 
-    if text == "🇺🇿 Valyuta kursi" and is_admin_id(cid):
+    if text == "🇺🇿 Valyuta kursi" and _require_perm(cid, "api_rates"):
         raw = http_get("https://cbu.uz/uz/arkhiv-kursov-valyut/json/")
         rates = {"USD": "?", "RUB": "?", "INR": "?", "TRY": "?"}
         try:
@@ -4999,7 +5305,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
     # ADMIN PANEL: Majburiy obunalar
     # ========================================================================
 
-    if text == "📎 Majburiy obunalar" and is_admin_id(cid):
+    if text == "📎 Majburiy obunalar" and _require_perm(cid, "channels"):
         sms(
             cid,
             text,
@@ -5495,7 +5801,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         ])
         return txt, kb
 
-    if text == "💵 Pul ishlash sozlamalari" and is_admin_id(cid):
+    if text == "💵 Pul ishlash sozlamalari" and _require_perm(cid, "earn"):
         p_txt, p_kb = _build_admin_earn_panel()
         sms(cid, p_txt, p_kb)
         return
