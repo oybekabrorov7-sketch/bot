@@ -26,16 +26,28 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
+
+# ============================================================================
+# 1-BO'LIM: CONFIG (SOZLAMALAR)
+# ============================================================================
+
+"""
+1-MODUL: config.py — Barcha asosiy sozlamalar (Token, Admin ID va Baza yo'llari).
+Ushbu faylni qolgan 5 ta fayl bilan bitta papkada (masalan, Nurullo/ papkasida) saqlang.
+"""
 import os
 
 
 class Config:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-    # Telegram Bot sozlamalari (@BotFather dan olingan token va Admin ID)
+    # Telegram Bot va Gemini AI sozlamalari (ai arab gemini api key.txt faylidan o'rnatildi)
     BOT_TOKEN = os.getenv("BOT_TOKEN", "8655952088:AAGZq3Z5u-5r9onDaib-KO2K089J4jTHxJc")
     ADMIN_ID = os.getenv("ADMIN_ID", "6892561572")
     BOT_USERNAME = os.getenv("BOT_USERNAME", "ANTAARAB_SMM_ORG_BOT")
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6L4VDjV-bKHSiakB7ZZGIfEibQILHu0fmcIxJCfD_pWqw")
+    ENABLE_AI_ARAB = os.getenv("ENABLE_AI_ARAB", "1") == "1"
 
 
     # Sayt va Veb-server sozlamalari
@@ -293,6 +305,18 @@ class DatabaseModule:
             )""",
             "CREATE INDEX IF NOT EXISTS `idx_hosted_bots_owner` ON `hosted_bots` (`owner_id`)",
             "CREATE INDEX IF NOT EXISTS `idx_admins_uid` ON `admins` (`user_id`)",
+            """CREATE TABLE IF NOT EXISTS `ai_subscriptions` (
+                `user_id` TEXT PRIMARY KEY,
+                `plan` TEXT NOT NULL DEFAULT 'BEPUL',
+                `expires_ts` REAL NOT NULL DEFAULT 0,
+                `expires_str` TEXT NOT NULL DEFAULT 'Doimiy (Bepul)',
+                `daily_used` INTEGER NOT NULL DEFAULT 0,
+                `daily_date` TEXT NOT NULL DEFAULT '',
+                `weekly_used` INTEGER NOT NULL DEFAULT 0,
+                `weekly_key` TEXT NOT NULL DEFAULT '',
+                `images_used` INTEGER NOT NULL DEFAULT 0,
+                `total_requests` INTEGER NOT NULL DEFAULT 0
+            )""",
         ]
         for stmt in schema_statements:
             cur.execute(stmt)
@@ -1137,20 +1161,28 @@ def inspect_py_file_metadata(raw_bytes: bytes) -> Dict[str, Any]:
     return info
 
 
-def _build_configured_smm_source(b_token: str, b_admin: str, b_uname: str) -> str:
-    """To'liq mustaqil va xatosiz ishlaydigan SMM bot kodini berilgan Token va Admin ID bilan tayyorlaydi."""
+def _build_configured_smm_source(b_token: str, b_admin: str, b_uname: str, enable_ai: bool = False) -> str:
+    """To'liq mustaqil va xatosiz ishlaydigan SMM bot kodini berilgan Token, Admin ID va Tarif bo'yicha tayyorlaydi."""
     base_src = get_clean_bot_code_bytes().decode("utf-8", errors="replace")
+    for tok_pat in ('"TOKEN_SHU_YERGA_YOZILADI"', '"8655952088:AAGZq3Z5u-5r9onDaib-KO2K089J4jTHxJc"'):
+        base_src = base_src.replace(
+            f'BOT_TOKEN = os.getenv("BOT_TOKEN", {tok_pat})',
+            f'BOT_TOKEN = "{b_token}"',
+        )
+    for adm_pat in ('"ADMIN_ID_SHU_YERGA_YOZILADI"', '"6892561572"'):
+        base_src = base_src.replace(
+            f'ADMIN_ID = os.getenv("ADMIN_ID", {adm_pat})',
+            f'ADMIN_ID = "{b_admin}"',
+        )
+    for un_pat in ('"special_smm_bot"', '"ANTAARAB_SMM_ORG_BOT"'):
+        base_src = base_src.replace(
+            f'BOT_USERNAME = os.getenv("BOT_USERNAME", {un_pat})',
+            f'BOT_USERNAME = "{b_uname}"',
+        )
+    ai_flag_str = "True" if enable_ai else "False"
     base_src = base_src.replace(
-        'BOT_TOKEN = os.getenv("BOT_TOKEN", "TOKEN_SHU_YERGA_YOZILADI")',
-        f'BOT_TOKEN = "{b_token}"',
-    )
-    base_src = base_src.replace(
-        'ADMIN_ID = os.getenv("ADMIN_ID", "ADMIN_ID_SHU_YERGA_YOZILADI")',
-        f'ADMIN_ID = "{b_admin}"',
-    )
-    base_src = base_src.replace(
-        'BOT_USERNAME = os.getenv("BOT_USERNAME", "special_smm_bot")',
-        f'BOT_USERNAME = "{b_uname}"',
+        'ENABLE_AI_ARAB = os.getenv("ENABLE_AI_ARAB", "1") == "1"',
+        f'ENABLE_AI_ARAB = {ai_flag_str}',
     )
     base_src = base_src.replace(
         'PORT = int(os.getenv("PORT", "8000"))',
@@ -1513,8 +1545,9 @@ def deploy_and_start_hosted_bot(bot_row: Dict[str, Any], custom_py_bytes: Option
             f.write(patched_src)
         if meta.get("is_smm_bot"):
             _seed_child_bot_catalog_if_empty(bot_dir)
-    elif not os.path.exists(runner_path) or bot_row.get("bot_category") == "smm":
-        patched_src = _build_configured_smm_source(b_token, b_admin, b_uname)
+    is_plus_bot = str(bot_row.get("tariff_plan", "")).strip().upper() == "PLUS"
+    if custom_py_bytes is None and (not os.path.exists(runner_path) or bot_row.get("bot_category") == "smm"):
+        patched_src = _build_configured_smm_source(b_token, b_admin, b_uname, enable_ai=is_plus_bot)
         with open(runner_path, "w", encoding="utf-8") as f:
             f.write(patched_src)
         _seed_child_bot_catalog_if_empty(bot_dir)
@@ -1530,6 +1563,7 @@ def deploy_and_start_hosted_bot(bot_row: Dict[str, Any], custom_py_bytes: Option
     env["BOT_TOKEN"] = b_token
     env["ADMIN_ID"] = b_admin
     env["BOT_USERNAME"] = b_uname
+    env["ENABLE_AI_ARAB"] = "1" if is_plus_bot else "0"
     env["PORT"] = "0"
     env["PYTHONPATH"] = bot_dir
 
@@ -1552,7 +1586,7 @@ def deploy_and_start_hosted_bot(bot_row: Dict[str, Any], custom_py_bytes: Option
                 log_file.close()
             except Exception:
                 pass
-            fallback_src = _build_configured_smm_source(b_token, b_admin, b_uname)
+            fallback_src = _build_configured_smm_source(b_token, b_admin, b_uname, enable_ai=is_plus_bot)
             with open(runner_path, "w", encoding="utf-8") as f:
                 f.write(fallback_src)
             _seed_child_bot_catalog_if_empty(bot_dir)
@@ -1975,6 +2009,7 @@ AORT_KB = reply_keyboard([[{"text": "🗄️ Boshqaruv"}]])
 PANEL_KB = reply_keyboard([
     [{"text": "⚙️ Asosiy sozlamalar"}, {"text": "💳 Hamyonlar sozlamalari"}],
     [{"text": "💵 Pul ishlash sozlamalari"}, {"text": "👑 Admin qo‘shish"}],
+    [{"text": "🤖 AI Arab sozlamalari"}],
     [{"text": "🔔 Xabar yuborish"}, {"text": "📊 Statistika"}],
     [{"text": "👤 Foydalanuvchini boshqarish"}],
     [{"text": "🇺🇿 Valyuta kursi"}, {"text": "⏰ Cron sozlamasi"}],
@@ -2061,15 +2096,17 @@ PANEL2_KB = reply_keyboard([
     [{"text": "🗄️ Boshqaruv"}],
 ])
 
+_TOP_MENU_ROW = [{"text": "➕ Buyurtma berish"}, {"text": "🤖 AI Arab"}] if config.ENABLE_AI_ARAB else [{"text": "➕ Buyurtma berish"}]
+
 MENU_USER_KB = reply_keyboard([
-    [{"text": "➕ Buyurtma berish"}],
+    _TOP_MENU_ROW,
     [{"text": "🛒 Buyurtmalar"}, {"text": "💵 Pul ishlash"}],
     [{"text": "💳 Balans"}, {"text": "💳 Pul kiritish"}],
     [{"text": "☎️ Yordam"}, {"text": "🤝 Hamkorlik dasturi"}],
 ])
 
 MENU_ADMIN_KB = reply_keyboard([
-    [{"text": "➕ Buyurtma berish"}],
+    _TOP_MENU_ROW,
     [{"text": "🛒 Buyurtmalar"}, {"text": "💵 Pul ishlash"}],
     [{"text": "💳 Balans"}, {"text": "💳 Pul kiritish"}],
     [{"text": "☎️ Yordam"}, {"text": "🤝 Hamkorlik dasturi"}],
@@ -2730,6 +2767,9 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             "➡ Orqaga": "➡️ Orqaga",
             "🗑 O'chirish": "🗑️ O‘chirish",
             "❌ Bekor qilish": "❌ Bekor qilish",
+            "AI Arab": "🤖 AI Arab",
+            "ai arab": "🤖 AI Arab",
+            "🤖 ai arab": "🤖 AI Arab",
         }
         if clean_t in button_aliases:
             text = button_aliases[clean_t]
@@ -2802,12 +2842,12 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
     # Agar foydalanuvchi asosiy menyu tugmalaridan birini bossa, eski tugallanmagan step'ni tozalaymiz
     MAIN_BUTTONS = {
         "/start", "/admin", "/panel", "➡️ Orqaga", "⏪ Orqaga", "🗄️ Boshqaruv",
-        "⚙️ Asosiy sozlamalar", "💳 Hamyonlar sozlamalari", "💵 Pul ishlash sozlamalari", "👑 Admin qo‘shish", "🔔 Xabar yuborish",
+        "⚙️ Asosiy sozlamalar", "💳 Hamyonlar sozlamalari", "💵 Pul ishlash sozlamalari", "👑 Admin qo‘shish", "🤖 AI Arab sozlamalari", "🔔 Xabar yuborish",
         "📊 Statistika", "👤 Foydalanuvchini boshqarish", "🇺🇿 Valyuta kursi",
         "⏰ Cron sozlamasi", "🛍 Buyurtmalarni sozlash",
         "💵 Kursni o‘rnatish", "⚖️ Foizni o‘rnatish", "📊 Buyurtmani tekshirish",
         "📎 Majburiy obunalar", "🔑 API Sozlamalari", "⚙️ Boshqa sozlamalar",
-        "➕ Buyurtma berish", "🛒 Buyurtmalar", "💵 Pul ishlash",
+        "➕ Buyurtma berish", "🤖 AI Arab", "🛒 Buyurtmalar", "💵 Pul ishlash",
         "💳 Balans", "💳 Pul kiritish", "☎️ Yordam", "🤝 Hamkorlik dasturi",
     }
     if text in MAIN_BUTTONS and step:
@@ -3540,15 +3580,16 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
                 f"🟢 <b>GO Tarifi — {go_p} so‘m / oy</b>\n"
                 f"• ⚙️ 1 ta Telegram Bot (24/7 uzluksiz ishlash)\n"
                 f"• 💾 512 MB RAM | 5 GB SSD xotira\n"
-                f"• 🔄 Avto-restart tizimi\n\n"
+                f"• ❌ <i>AI Arab (Gemini AI) buyruqlari chiqmaydi</i>\n\n"
                 f"🔵 <b>PRO Tarifi — {pro_p} so‘m / oy</b>\n"
-                f"• ⚡ Yuqori tezlik (TURBO 24/7)\n"
-                f"• 💾 1 GB RAM | 15 GB NVMe SSD xotira\n"
-                f"• 🛡 DDoS himoya + Avto-restart + Log nazorati\n\n"
-                f"🟣 <b>PLUS Tarifi — {plus_p} so‘m / oy</b>\n"
-                f"• 👑 VIP Dedicated quvvat (Maksimal tezlik)\n"
-                f"• 💾 2 GB RAM | 30 GB NVMe SSD xotira\n"
+                f"• ⚡ Yuqori tezlik (TURBO 24/7) | 1 GB RAM | 15 GB SSD\n"
+                f"• 🛡 DDoS himoya + Avto-restart\n"
+                f"• ❌ <i>AI Arab (Gemini AI) buyruqlari chiqmaydi</i>\n\n"
+                f"🟣 <b>PLUS Tarifi — {plus_p} so‘m / oy (VIP)</b>\n"
+                f"• 👑 Maksimal tezlik | 2 GB RAM | 30 GB NVMe SSD\n"
+                f"• 🤖 <b>ЭКСКЛЮЗИВ: Bot ichida «🤖 AI Arab (Gemini AI)» funksiyasi, rasm chizish va AI tariflar to‘liq ishlaydi!</b>\n"
                 f"• 🚀 100% Uptime kafolati + VIP yordam\n\n"
+                f"⚠️ <i>Eslatma: «🤖 AI Arab» komandalari va bo‘limi faqatgina <b>PLUS</b> tarifida ochilgan botlarda ishlaydi, undan past tariflarda (GO va PRO) bu komandalar chiqmaydi!</i>\n\n"
                 f"💵 <b>Sizning balansingiz:</b> <b>{u_bal_str} so‘m</b>\n\n"
                 f"👇 <i>O‘zingizga mos server tarifini tanlang:</i>",
                 keyboard([
@@ -3580,7 +3621,8 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
                 f"✨ <b>Qanday ishlaydi?</b>\n"
                 f"• Sizga bot kodi berilmaydi va dasturlash talab qilinmaydi!\n"
                 f"• Faqatgina @BotFather dan olgan <b>Token</b>, <b>Admin ID</b> va <b>Bot useri (@username)</b> ni yuborasiz.\n"
-                f"• Serverimiz botingizni <b>avtomatik to‘g‘irlab, 24/7 rejimda darhol ishga tushirib beradi!</b>\n\n"
+                f"• Serverimiz botingizni <b>avtomatik to‘g‘irlab, 24/7 rejimda darhol ishga tushirib beradi!</b>\n"
+                f"• ℹ️ <i>Eslatma: Standart SMM Bot tarifida «🤖 AI Arab» bo‘limi bo‘lmaydi. Botingizda «🤖 AI Arab (Gemini AI)» ham bo‘lishini xohlasangiz, «🖥 Bo‘tni serverga qo‘yish ➡️ 🟣 PLUS» tarifidan foydalaning!</i>\n\n"
                 f"{trial_badge}\n"
                 f"💵 <b>Sizning balansingiz:</b> <b>{u_bal_str} so‘m</b>\n\n"
                 f"👇 <i>Boshlash uchun quyidagi tugmani bosing:</i>",
@@ -5220,11 +5262,33 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
         return
 
     if data == "plus":
+        if not _require_perm(chat_id, "users"):
+            return
+        if str(chat_id) != str(ADMIN) and (str(saved) == str(chat_id) or is_admin_id(saved)):
+            bot(
+                "answerCallbackQuery",
+                {
+                    "callback_query_id": cqid,
+                    "text": "⛔️ Xavfsizlik qoidasi: Adminlar o‘z hisobini (yoki boshqa admin hisobini) o‘zi to‘ldira olmaydi! Faqat Bosh Admin hisob to‘ldira oladi.",
+                    "show_alert": True,
+                },
+            )
+            return
         sms(chat_id, f"<a href='tg://user?id={saved}'>{saved}</a> <b>ning hisobiga qancha pul qo'shmoqchisiz?</b>", AORT_KB)
         put_file(f"user/{chat_id}.step", "plus")
         return
 
     if step == "plus" and is_admin_id(cid) and text:
+        if not _require_perm(cid, "users"):
+            return
+        if str(cid) != str(ADMIN) and (str(saved) == str(cid) or is_admin_id(saved)):
+            sms(
+                cid,
+                "⛔️ <b>Taqiqlangan amal!</b>\nQo‘shimcha adminlar o‘z hisobini o‘zi to‘ldira olmaydi. Faqat Bosh Admin hisob to‘ldira oladi!",
+                get_dynamic_panel_kb(cid),
+            )
+            unlink_file(f"user/{cid}.step")
+            return
         if text.lstrip("-").replace(".", "", 1).isdigit():
             val = float(text)
             rew = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (saved,))
@@ -6449,6 +6513,718 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
                 put_file("payments.txt", f"\n{checkid}", append=True)
                 sms(ADMIN, f"💳 Hisob to'ldirildi\n👤 Foydalanuvchi: {chat_id}\n💰 Summa: {plus} so'm")
         return
+
+    # ========================================================================
+    # 🤖 AI ARAB — GOOGLE GEMINI API + TARIFLAR (BEPUL, GO, PRO, PLUS)
+    #    + 1 KUN / 1 HAFTA / 1 OY / 3 OY / 6 OY / 1 YIL MUDDATLAR
+    #    + KUNLIK / HAFTALIK / RASM LIMITLARI + BOSH ADMIN MAXSUS SOZLAMALARI
+    # ========================================================================
+
+    def _get_active_gemini_key() -> str:
+        saved_k = get_file("set/gemini_api_key.txt").strip()
+        return saved_k if saved_k else config.GEMINI_API_KEY
+
+    def _get_ai_tariffs_config() -> Dict[str, Dict[str, Any]]:
+        """
+        AI Arab tariflari (BEPUL, GO, PRO, PLUS):
+        - BEPUL: kunlik 5 ta, haftalik 15 ta, rasm 1 ta (tez tugaydi)
+        - GO: kunlik 20 ta, haftalik 90 ta, rasm 10 ta (1 oy = 15 000 so'm)
+        - PRO: kunlik 45 ta, haftalik 200 ta, rasm 25 ta (1 oy = 30 000 so'm)
+        - PLUS: kunlik 90 ta, haftalik 400 ta, rasm 50 ta (1 oy = 50 000 so'm — rasmiy Geminidan kamroq, lekin optimal!)
+        """
+        default_cfg: Dict[str, Dict[str, Any]] = {
+            "BEPUL": {
+                "name": "🆓 BEPUL",
+                "daily_limit": int(float(get_file("set/ai_lim_bepul_d.txt").strip() or 5)),
+                "weekly_limit": int(float(get_file("set/ai_lim_bepul_w.txt").strip() or 15)),
+                "image_limit": int(float(get_file("set/ai_lim_bepul_i.txt").strip() or 1)),
+                "base_monthly": 0.0,
+            },
+            "GO": {
+                "name": "🟢 GO",
+                "daily_limit": int(float(get_file("set/ai_lim_go_d.txt").strip() or 20)),
+                "weekly_limit": int(float(get_file("set/ai_lim_go_w.txt").strip() or 90)),
+                "image_limit": int(float(get_file("set/ai_lim_go_i.txt").strip() or 10)),
+                "base_monthly": float(get_file("set/ai_price_go_m.txt").strip() or 15000),
+            },
+            "PRO": {
+                "name": "🔵 PRO",
+                "daily_limit": int(float(get_file("set/ai_lim_pro_d.txt").strip() or 45)),
+                "weekly_limit": int(float(get_file("set/ai_lim_pro_w.txt").strip() or 200)),
+                "image_limit": int(float(get_file("set/ai_lim_pro_i.txt").strip() or 25)),
+                "base_monthly": float(get_file("set/ai_price_pro_m.txt").strip() or 30000),
+            },
+            "PLUS": {
+                "name": "🟣 PLUS",
+                "daily_limit": int(float(get_file("set/ai_lim_plus_d.txt").strip() or 90)),
+                "weekly_limit": int(float(get_file("set/ai_lim_plus_w.txt").strip() or 400)),
+                "image_limit": int(float(get_file("set/ai_lim_plus_i.txt").strip() or 50)),
+                "base_monthly": float(get_file("set/ai_price_plus_m.txt").strip() or 50000),
+            },
+        }
+        return default_cfg
+
+    # 6 xil muddat: 1 kun, 1 hafta, 1 oy, 3 oy, 6 oy, 1 yil
+    AI_DURATION_OPTIONS: Dict[str, Dict[str, Any]] = {
+        "1d": {"label": "1 kun", "days": 1, "mult": 0.12},
+        "1w": {"label": "1 hafta (7 kun)", "days": 7, "mult": 0.36},
+        "1m": {"label": "1 oy (30 kun)", "days": 30, "mult": 1.0},
+        "3m": {"label": "3 oy (90 kun)", "days": 90, "mult": 2.6},
+        "6m": {"label": "6 oy (180 kun)", "days": 180, "mult": 4.8},
+        "1y": {"label": "1 yil (365 kun)", "days": 365, "mult": 9.0},
+    }
+
+    def _calc_ai_plan_price(plan_key: str, dur_key: str) -> float:
+        cfg = _get_ai_tariffs_config()
+        base_m = float(cfg.get(plan_key, {}).get("base_monthly") or 15000)
+        mult = float(AI_DURATION_OPTIONS.get(dur_key, {}).get("mult") or 1.0)
+        # 500 so'mga yaxlitlaymiz
+        raw_p = base_m * mult
+        return float(max(1000, int(round(raw_p / 500.0) * 500)))
+
+    def _get_user_ai_sub(user_uid: str) -> Dict[str, Any]:
+        u_str = str(user_uid).strip()
+        today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+        week_str = datetime.datetime.now().strftime("%Y-W%W")
+        row = database.fetch_one("SELECT * FROM `ai_subscriptions` WHERE `user_id` = ?", (u_str,))
+        if not row:
+            database.execute(
+                """INSERT OR IGNORE INTO `ai_subscriptions`
+                (`user_id`, `plan`, `expires_ts`, `expires_str`, `daily_used`, `daily_date`, `weekly_used`, `weekly_key`, `images_used`, `total_requests`)
+                VALUES (?, 'BEPUL', 0, 'Doimiy (Bepul)', 0, ?, 0, ?, 0, 0)""",
+                (u_str, today_str, week_str),
+            )
+            row = database.fetch_one("SELECT * FROM `ai_subscriptions` WHERE `user_id` = ?", (u_str,)) or {
+                "user_id": u_str, "plan": "BEPUL", "expires_ts": 0, "expires_str": "Doimiy (Bepul)",
+                "daily_used": 0, "daily_date": today_str, "weekly_used": 0, "weekly_key": week_str,
+                "images_used": 0, "total_requests": 0,
+            }
+
+        changed = False
+        # Muddati tugagan pullik tarifni BEPUL ga qaytarish
+        if row.get("plan") != "BEPUL" and float(row.get("expires_ts") or 0) > 0 and time.time() >= float(row["expires_ts"]):
+            row["plan"] = "BEPUL"
+            row["expires_ts"] = 0
+            row["expires_str"] = "Muddati tugagan (BEPUL)"
+            row["images_used"] = 0
+            changed = True
+
+        # Kunlik limit hisoblagichini yangi kunda 0 qilish
+        if row.get("daily_date") != today_str:
+            row["daily_date"] = today_str
+            row["daily_used"] = 0
+            changed = True
+
+        # Haftalik limit hisoblagichini yangi haftada 0 qilish
+        if row.get("weekly_key") != week_str:
+            row["weekly_key"] = week_str
+            row["weekly_used"] = 0
+            changed = True
+
+        if changed:
+            database.execute(
+                """UPDATE `ai_subscriptions`
+                SET `plan` = ?, `expires_ts` = ?, `expires_str` = ?, `daily_used` = ?, `daily_date` = ?, `weekly_used` = ?, `weekly_key` = ?, `images_used` = ?
+                WHERE `user_id` = ?""",
+                (
+                    row["plan"], row["expires_ts"], row["expires_str"],
+                    row["daily_used"], row["daily_date"], row["weekly_used"], row["weekly_key"],
+                    row["images_used"], u_str,
+                ),
+            )
+        return row
+
+    def _check_and_consume_ai_quota(user_uid: str, is_image: bool = False) -> Tuple[bool, str]:
+        """
+        Faqat Bosh Admin (str(user_uid) == str(ADMIN)) cheksiz foydalana oladi!
+        Qolgan barcha foydalanuvchilar (va qo'shimcha adminlar ham!) tarif limitiga bo'ysunadi.
+        """
+        u_str = str(user_uid).strip()
+        if u_str == str(ADMIN):
+            return True, "♾ Bosh Admin (Cheksiz)"
+
+        sub = _get_user_ai_sub(u_str)
+        plan_key = str(sub.get("plan") or "BEPUL").upper()
+        cfg = _get_ai_tariffs_config()
+        p_info = cfg.get(plan_key, cfg["BEPUL"])
+
+        d_used = int(sub.get("daily_used") or 0)
+        w_used = int(sub.get("weekly_used") or 0)
+        i_used = int(sub.get("images_used") or 0)
+
+        d_lim = int(p_info["daily_limit"])
+        w_lim = int(p_info["weekly_limit"])
+        i_lim = int(p_info["image_limit"])
+
+        if is_image and i_used >= i_lim:
+            return False, (
+                f"⛔️ <b>Rasm yaratish limitingiz tugadi!</b>\n\n"
+                f"🏷 Sizning tarifingiz: <b>{p_info['name']}</b>\n"
+                f"🎨 Rasm limiti: <b>{i_used}/{i_lim} ta</b>\n\n"
+                f"👇 Ko‘proq rasm yaratish (PLUS tarifida <b>50 ta rasm</b>!) uchun <b>«💎 AI Tariflar (GO / PRO / PLUS)»</b> tugmasini bosing!"
+            )
+
+        if d_used >= d_lim:
+            return False, (
+                f"⛔️ <b>Kunlik AI so‘rov limitingiz tugadi!</b>\n\n"
+                f"🏷 Sizning tarifingiz: <b>{p_info['name']}</b>\n"
+                f"💬 Kunlik limit: <b>{d_used}/{d_lim} ta</b>\n"
+                f"📅 Haftalik limit: <b>{w_used}/{w_lim} ta</b>\n\n"
+                f"👇 Limitni oshirish uchun <b>«💎 AI Tariflar (GO / PRO / PLUS)»</b> bo‘limidan yuqori tarifga o‘ting!"
+            )
+
+        if w_used >= w_lim:
+            return False, (
+                f"⛔️ <b>Haftalik AI so‘rov limitingiz tugadi!</b>\n\n"
+                f"🏷 Sizning tarifingiz: <b>{p_info['name']}</b>\n"
+                f"📅 Haftalik limit: <b>{w_used}/{w_lim} ta</b>\n\n"
+                f"👇 Limitni yangilash va kengaytirish uchun <b>«💎 AI Tariflar (GO / PRO / PLUS)»</b> bo‘limidan yuqori tarifga o‘ting!"
+            )
+
+        # Limit yetarli — hisoblagichni 1 taga oshiramiz
+        new_d = d_used + 1
+        new_w = w_used + 1
+        new_i = i_used + (1 if is_image else 0)
+        new_tot = int(sub.get("total_requests") or 0) + 1
+        database.execute(
+            """UPDATE `ai_subscriptions`
+            SET `daily_used` = ?, `weekly_used` = ?, `images_used` = ?, `total_requests` = ?
+            WHERE `user_id` = ?""",
+            (new_d, new_w, new_i, new_tot, u_str),
+        )
+        rem_d = max(0, d_lim - new_d)
+        rem_i = max(0, i_lim - new_i)
+        return True, f"🏷 {p_info['name']} | 💬 Kunlik qoldiq: {rem_d}/{d_lim} | 🎨 Rasm: {rem_i}/{i_lim}"
+
+    def _call_gemini_api_text(user_uid: str, user_question: str) -> str:
+        """Google Gemini API (GEMINI_API_KEY) orqali matnli javob oladi."""
+        gem_key = _get_active_gemini_key()
+        u_row = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (user_uid,)) or {}
+        u_bal = fmt_money(u_row.get("balance", "0"))
+        srvs = database.fetch_all("SELECT * FROM `services` WHERE `service_status` = 'on' LIMIT 10")
+        srv_summary = ", ".join(
+            f"{enc('decode', s.get('service_name', ''))} ({s.get('service_price', '0')} so'm)"
+            for s in srvs
+        ) or "Telegram, Instagram, YouTube, TikTok SMM xizmatlari"
+
+        hist_raw = get_file(f"user/{user_uid}.ai_hist.json").strip()
+        try:
+            history: List[Dict[str, str]] = json.loads(hist_raw) if hist_raw else []
+        except Exception:
+            history = []
+
+        sys_instruction = (
+            "Sen 'AI Arab' — Google Gemini API asosida ishlovchi kuchli sun'iy intellekt yordamchisan. "
+            "Foydalanuvchiga o'zbek tilida (yoki u murojaat qilgan tilda) aniq, muloyim va mukammal javob ber. "
+            f"Foydalanuvchi balansi: {u_bal} so'm. Botdagi SMM xizmatlar: {srv_summary}."
+        )
+
+        # 1. Google Gemini REST API (generativelanguage.googleapis.com)
+        gemini_contents = []
+        for h in history[-6:]:
+            role_g = "user" if h.get("role") == "user" else "model"
+            gemini_contents.append({"role": role_g, "parts": [{"text": h.get("content", "")}]})
+        gemini_contents.append({"role": "user", "parts": [{"text": user_question}]})
+
+        gemini_payload = json.dumps({
+            "system_instruction": {"parts": [{"text": sys_instruction}]},
+            "contents": gemini_contents,
+            "generationConfig": {"temperature": 0.7, "maxOutputTokens": 1024},
+        }).encode("utf-8")
+
+        ai_answer = ""
+        if gem_key:
+            for model_name in ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"):
+                try:
+                    url_g = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={urllib.parse.quote(gem_key)}"
+                    hdrs = {"Content-Type": "application/json"}
+                    if gem_key.startswith("AQ."):
+                        hdrs["x-goog-api-key"] = gem_key
+                    req = urllib.request.Request(url_g, data=gemini_payload, headers=hdrs, method="POST")
+                    with urllib.request.urlopen(req, context=_UNVERIFIED_SSL_CTX, timeout=12) as resp:
+                        res_data = json.loads(resp.read().decode("utf-8", errors="replace"))
+                        cands = res_data.get("candidates") or []
+                        if cands:
+                            parts = cands[0].get("content", {}).get("parts") or []
+                            if parts and parts[0].get("text"):
+                                ai_answer = str(parts[0]["text"]).strip()
+                                break
+                except Exception:
+                    continue
+
+        # 2. Zaxira (Fallback) Gemini/OpenAI shlyuzi — agar kalit yoki tarmoq javob bermasa, foydalanuvchi javobsiz qolmaydi
+        if not ai_answer:
+            try:
+                messages_payload = [{"role": "system", "content": sys_instruction}]
+                for h_item in history[-6:]:
+                    messages_payload.append(h_item)
+                messages_payload.append({"role": "user", "content": user_question})
+                req_body = json.dumps({"messages": messages_payload, "model": "openai", "private": True}).encode("utf-8")
+                req = urllib.request.Request(
+                    "https://text.pollinations.ai/",
+                    data=req_body,
+                    headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, context=_UNVERIFIED_SSL_CTX, timeout=12) as resp:
+                    ai_answer = resp.read().decode("utf-8", errors="replace").strip()
+            except Exception:
+                ai_answer = ""
+
+        if not ai_answer:
+            ai_answer = (
+                f"🤖 <b>AI Arab (Gemini AI):</b>\n\n"
+                f"Savolingiz: <i>«{user_question}»</i>\n\n"
+                f"💵 Sizning balansingiz: <b>{u_bal} so‘m</b>.\n"
+                f"🛍 Mavjud xizmatlar: {srv_summary}"
+            )
+
+        history.append({"role": "user", "content": user_question})
+        history.append({"role": "assistant", "content": ai_answer[:700]})
+        put_file(f"user/{user_uid}.ai_hist.json", json.dumps(history[-6:], ensure_ascii=False))
+        return ai_answer
+
+    def _ai_arab_main_view(user_uid: str) -> Tuple[str, str]:
+        u_str = str(user_uid).strip()
+        is_owner = (u_str == str(ADMIN))
+        sub = _get_user_ai_sub(u_str)
+        plan_key = str(sub.get("plan") or "BEPUL").upper()
+        cfg = _get_ai_tariffs_config()
+        p_info = cfg.get(plan_key, cfg["BEPUL"])
+
+        if is_owner:
+            status_block = (
+                "👑 <b>Maqomingiz:</b> <b>Bosh Admin (VIP Cheksiz)</b>\n"
+                "💬 <b>Kunlik / Haftalik limit:</b> <code>♾ Cheksiz</code>\n"
+                "🎨 <b>Rasm yaratish limiti:</b> <code>♾ Cheksiz</code>"
+            )
+        else:
+            d_used, d_lim = int(sub.get("daily_used") or 0), int(p_info["daily_limit"])
+            w_used, w_lim = int(sub.get("weekly_used") or 0), int(p_info["weekly_limit"])
+            i_used, i_lim = int(sub.get("images_used") or 0), int(p_info["image_limit"])
+            exp_s = sub.get("expires_str") or "Doimiy (Bepul)"
+            status_block = (
+                f"🏷 <b>Joriy AI Tarifingiz:</b> <b>{p_info['name']}</b> (Muddati: <code>{exp_s}</code>)\n"
+                f"💬 <b>Kunlik limit:</b> <code>{d_used} / {d_lim} ta</code> (Qoldi: <b>{max(0, d_lim - d_used)} ta</b>)\n"
+                f"📅 <b>Haftalik limit:</b> <code>{w_used} / {w_lim} ta</code> (Qoldi: <b>{max(0, w_lim - w_used)} ta</b>)\n"
+                f"🎨 <b>Rasm limiti:</b> <code>{i_used} / {i_lim} ta</code> (Qoldi: <b>{max(0, i_lim - i_used)} ta</b>)"
+            )
+
+        txt = (
+            "🤖 <b>AI Arab — Google Gemini Sun'iy Intellekt Tizimi!</b>\n\n"
+            f"{status_block}\n\n"
+            "✨ <b>Imkoniyatlar:</b>\n"
+            "• 💬 Istalgan savolga javob, kod yozish, tarjima va SMM postlar tuzish\n"
+            "• 🎨 Matn orqali sun'iy intellektda rasm chizdirish\n\n"
+            "✍️ <b>Savolingizni yozib yuboring yoki quyidagi tugmalardan foydalaning:</b>"
+        )
+        kb = keyboard([
+            [
+                {"text": "🎨 Rasm yaratish (AI)", "callback_data": "ai_arab=draw_prompt"},
+                {"text": "💎 AI Tariflar (GO / PRO / PLUS)", "callback_data": "ai_arab=tariffs"},
+            ],
+            [
+                {"text": "✍️ Post va reklama tuzish", "callback_data": "ai_arab=post"},
+                {"text": "📈 SMM maslahat", "callback_data": "ai_arab=smm"},
+            ],
+            [
+                {"text": "📊 Mening limitim", "callback_data": "ai_arab=my_limits"},
+                {"text": "🧹 Suhbatni tozalash", "callback_data": "ai_arab=clear"},
+            ],
+        ])
+        return txt, kb
+
+    if text == "🤖 AI Arab" and config.ENABLE_AI_ARAB and joinchat(cid):
+        put_file(f"user/{cid}.step", "ai_arab_chat")
+        v_txt, v_kb = _ai_arab_main_view(cid)
+        sms(cid, "🤖 <b>AI Arab</b> muloqot rejimi faollashdi (Chiqish uchun «➡️ Orqaga»):", ORT_KB)
+        sms(cid, v_txt, v_kb)
+        return
+
+    if data.startswith("ai_arab=") and config.ENABLE_AI_ARAB and joinchat(chat_id):
+        act = data.split("=", 1)[1]
+        if act == "home" or act == "my_limits":
+            put_file(f"user/{chat_id}.step", "ai_arab_chat")
+            v_txt, v_kb = _ai_arab_main_view(chat_id)
+            edit(chat_id, message_id, v_txt, v_kb)
+            return
+        elif act == "clear":
+            unlink_file(f"user/{chat_id}.ai_hist.json")
+            bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "🧹 AI Arab bilan suhbat xotirasi tozalandi!", "show_alert": True})
+            return
+        elif act == "draw_prompt":
+            put_file(f"user/{chat_id}.step", "ai_arab_draw")
+            edit(
+                chat_id,
+                message_id,
+                "🎨 <b>AI Arab — Rasm Yaratish Rejimi</b>\n\n"
+                "Qanday rasm chizib berishimni xohlaysiz? Tasvirlab yozib yuboring:\n\n"
+                "<i>Masalan: Kelajakdagi Toshkent shahri, kiberpank uslubida, 4K</i>",
+                keyboard([[{"text": "⬅️ AI Arab menyusiga qaytish", "callback_data": "ai_arab=home"}]]),
+            )
+            return
+        elif act == "tariffs":
+            cfg = _get_ai_tariffs_config()
+            u_row = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (chat_id,)) or {}
+            u_bal = fmt_money(u_row.get("balance", "0"))
+            go_i, pro_i, plus_i, bep_i = cfg["GO"], cfg["PRO"], cfg["PLUS"], cfg["BEPUL"]
+            t_txt = (
+                "💎 <b>AI Arab (Gemini AI) Tariflari va Limitlari</b>\n\n"
+                f"🆓 <b>BEPUL (Boshlang‘ich — 0 so‘m):</b>\n"
+                f"• 💬 Kunlik: <b>{bep_i['daily_limit']} ta</b> | 📅 Haftalik: <b>{bep_i['weekly_limit']} ta</b>\n"
+                f"• 🎨 Rasm yaratish: <b>{bep_i['image_limit']} ta</b>\n\n"
+                f"🟢 <b>GO Tarifi (1 oy = {fmt_money(go_i['base_monthly'])} so‘m):</b>\n"
+                f"• 💬 Kunlik: <b>{go_i['daily_limit']} ta</b> | 📅 Haftalik: <b>{go_i['weekly_limit']} ta</b>\n"
+                f"• 🎨 Rasm yaratish: <b>{go_i['image_limit']} ta</b>\n\n"
+                f"🔵 <b>PRO Tarifi (1 oy = {fmt_money(pro_i['base_monthly'])} so‘m):</b>\n"
+                f"• 💬 Kunlik: <b>{pro_i['daily_limit']} ta</b> | 📅 Haftalik: <b>{pro_i['weekly_limit']} ta</b>\n"
+                f"• 🎨 Rasm yaratish: <b>{pro_i['image_limit']} ta</b>\n\n"
+                f"🟣 <b>PLUS Tarifi (1 oy = {fmt_money(plus_i['base_monthly'])} so‘m):</b>\n"
+                f"• 💬 Kunlik: <b>{plus_i['daily_limit']} ta</b> | 📅 Haftalik: <b>{plus_i['weekly_limit']} ta</b>\n"
+                f"• 🎨 Rasm yaratish: <b>{plus_i['image_limit']} ta rasm!</b>\n\n"
+                f"⏳ <i>Barcha tariflarni <b>1 kun, 1 hafta, 1 oy, 3 oy, 6 oy va 1 yil</b> muddatga xarid qilishingiz mumkin!</i>\n"
+                f"💵 <b>Sizning balansingiz:</b> <b>{u_bal} so‘m</b>\n\n"
+                "👇 <i>Xarid qilmoqchi bo‘lgan tarifingizni tanlang:</i>"
+            )
+            edit(
+                chat_id,
+                message_id,
+                t_txt,
+                keyboard([
+                    [{"text": "🟢 GO Tarifini tanlash", "callback_data": "ai_plan_sel=GO"}],
+                    [{"text": "🔵 PRO Tarifini tanlash", "callback_data": "ai_plan_sel=PRO"}],
+                    [{"text": "🟣 PLUS Tarifini tanlash (50 ta rasm)", "callback_data": "ai_plan_sel=PLUS"}],
+                    [{"text": "⬅️ Orqaga", "callback_data": "ai_arab=home"}],
+                ]),
+            )
+            return
+        elif act in ("post", "smm"):
+            ok_q, q_msg = _check_and_consume_ai_quota(chat_id, is_image=False)
+            if not ok_q:
+                sms(chat_id, q_msg, keyboard([[{"text": "💎 AI Tariflar (GO / PRO / PLUS)", "callback_data": "ai_arab=tariffs"}]]))
+                return
+            prompts_map = {
+                "post": "Telegram kanal va Instagram sahifa uchun mijozlarni jalb qiladigan chiroyli reklama posti yozib ber.",
+                "smm": "Telegram va Instagramda obunachilarni va ko'rishlarni tez ko'paytirish bo'yicha eng foydali 5 ta SMM maslahat ber.",
+            }
+            bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "🤖 Gemini AI javob tayyorlamoqda..."})
+            reply_txt = _call_gemini_api_text(chat_id, prompts_map[act])
+            _, v_kb = _ai_arab_main_view(chat_id)
+            sms(chat_id, f"🤖 <b>AI Arab (Gemini):</b>\n\n{reply_txt}\n\n<i>({q_msg})</i>", v_kb)
+            return
+
+    if data.startswith("ai_plan_sel=") and config.ENABLE_AI_ARAB and joinchat(chat_id):
+        plan_key = data.split("=", 1)[1].strip().upper()
+        cfg = _get_ai_tariffs_config()
+        if plan_key not in cfg:
+            return
+        p_info = cfg[plan_key]
+        u_row = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (chat_id,)) or {}
+        u_bal = fmt_money(u_row.get("balance", "0"))
+
+        kb_rows = []
+        lines = [
+            f"💎 <b>{p_info['name']} Tarifi — Muddatni tanlang:</b>\n",
+            f"• 💬 Kunlik limit: <b>{p_info['daily_limit']} ta xabar</b>",
+            f"• 📅 Haftalik limit: <b>{p_info['weekly_limit']} ta xabar</b>",
+            f"• 🎨 Rasm yaratish limiti: <b>{p_info['image_limit']} ta rasm</b>\n",
+            f"💵 <b>Sizning balansingiz:</b> <b>{u_bal} so‘m</b>\n",
+            "👇 <i>O‘zingizga qulay muddatni tanlang (1 kun, 1 hafta, 1 oy, 3 oy, 6 oy, 1 yil):</i>",
+        ]
+        for d_key in ("1d", "1w", "1m", "3m", "6m", "1y"):
+            d_obj = AI_DURATION_OPTIONS[d_key]
+            price_val = _calc_ai_plan_price(plan_key, d_key)
+            kb_rows.append([
+                {
+                    "text": f"⏳ {d_obj['label']} — {fmt_money(price_val)} so‘m",
+                    "callback_data": f"ai_plan_buy={plan_key}={d_key}",
+                }
+            ])
+        kb_rows.append([{"text": "💳 Hisobni to‘ldirish", "callback_data": "menu=tolov"}])
+        kb_rows.append([{"text": "⬅️ Orqaga (AI Tariflar)", "callback_data": "ai_arab=tariffs"}])
+        edit(chat_id, message_id, "\n".join(lines), keyboard(kb_rows))
+        return
+
+    if data.startswith("ai_plan_buy=") and config.ENABLE_AI_ARAB and joinchat(chat_id):
+        parts = data.split("=")
+        plan_key, dur_key = parts[1].upper(), parts[2]
+        cfg = _get_ai_tariffs_config()
+        if plan_key not in cfg or dur_key not in AI_DURATION_OPTIONS:
+            return
+        price_val = _calc_ai_plan_price(plan_key, dur_key)
+        d_obj = AI_DURATION_OPTIONS[dur_key]
+        p_info = cfg[plan_key]
+
+        u_row = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (chat_id,)) or {}
+        u_bal = float(u_row.get("balance") or 0)
+        if u_bal < price_val:
+            bot(
+                "answerCallbackQuery",
+                {
+                    "callback_query_id": cqid,
+                    "text": f"⛔️ Hisobingizda mablag‘ yetarli emas!\n\nKerak: {fmt_money(price_val)} so‘m\nBalansingiz: {fmt_money(u_bal)} so‘m",
+                    "show_alert": True,
+                },
+            )
+            return
+
+        new_bal = round(u_bal - price_val, 2)
+        database.execute("UPDATE `users` SET `balance` = ? WHERE `id` = ?", (fmt_money(new_bal), chat_id))
+
+        sub = _get_user_ai_sub(chat_id)
+        base_ts = max(time.time(), float(sub.get("expires_ts") or 0)) if sub.get("plan") == plan_key else time.time()
+        new_exp_ts = base_ts + (int(d_obj["days"]) * 86400)
+        new_exp_str = datetime.datetime.fromtimestamp(new_exp_ts).strftime("%Y.%m.%d %H:%M")
+
+        database.execute(
+            """UPDATE `ai_subscriptions`
+            SET `plan` = ?, `expires_ts` = ?, `expires_str` = ?, `daily_used` = 0, `weekly_used` = 0, `images_used` = 0
+            WHERE `user_id` = ?""",
+            (plan_key, new_exp_ts, new_exp_str, str(chat_id)),
+        )
+        bot(
+            "answerCallbackQuery",
+            {
+                "callback_query_id": cqid,
+                "text": f"🎉 Tabriklaymiz! {p_info['name']} tarifi ({d_obj['label']}) faollashtirildi!",
+                "show_alert": True,
+            },
+        )
+        v_txt, v_kb = _ai_arab_main_view(chat_id)
+        edit(
+            chat_id,
+            message_id,
+            f"✅ <b>{p_info['name']} tarifi ({d_obj['label']}) muvaffaqiyatli ulandi!</b>\n"
+            f"⏳ Amal qilish muddati: <code>{new_exp_str}</code> gacha\n\n" + v_txt,
+            v_kb,
+        )
+        return
+
+    # Rasm chizish qadami (ai_arab_draw)
+    if step == "ai_arab_draw" and text and config.ENABLE_AI_ARAB and joinchat(cid):
+        ok_q, q_msg = _check_and_consume_ai_quota(cid, is_image=True)
+        if not ok_q:
+            sms(cid, q_msg, keyboard([[{"text": "💎 AI Tariflar (GO / PRO / PLUS)", "callback_data": "ai_arab=tariffs"}]]))
+            return
+        prompt_str = text.strip()
+        sms(cid, "🎨 <b>AI Arab rasm chizmoqda, iltimos kuting...</b>")
+        img_url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(prompt_str)}?width=1024&height=1024&nologo=true&seed={random.randint(1, 99999)}"
+        res_ph = bot(
+            "sendPhoto",
+            {
+                "chat_id": cid,
+                "photo": img_url,
+                "caption": f"🎨 <b>AI Arab (Gemini) tomonidan yaratildi!</b>\n📝 Tasvir: <i>{prompt_str}</i>\n\n📊 {q_msg}",
+                "parse_mode": "HTML",
+                "reply_markup": keyboard([
+                    [{"text": "🎨 Yana rasm yaratish", "callback_data": "ai_arab=draw_prompt"}],
+                    [{"text": "💬 Suhbatga qaytish", "callback_data": "ai_arab=home"}],
+                ]),
+            },
+        )
+        if not res_ph.get("ok"):
+            sms(
+                cid,
+                f"🎨 <b>Rasm tayyor!</b>\n👉 <a href='{img_url}'>Rasmni ko‘rish va yuklab olish</a>\n\n📊 {q_msg}",
+                keyboard([[{"text": "💬 Suhbatga qaytish", "callback_data": "ai_arab=home"}]]),
+            )
+        put_file(f"user/{cid}.step", "ai_arab_chat")
+        return
+
+    # AI Arab matnli suhbat qadami (ai_arab_chat)
+    if step == "ai_arab_chat" and text and config.ENABLE_AI_ARAB and joinchat(cid):
+        # Agar foydalanuvchi "rasm chiz: ..." deb yozsa, rasm rejimiga yo'naltiramiz
+        low_t = text.strip().lower()
+        if low_t.startswith("rasm:") or low_t.startswith("rasm chiz"):
+            ok_q, q_msg = _check_and_consume_ai_quota(cid, is_image=True)
+            if not ok_q:
+                sms(cid, q_msg, keyboard([[{"text": "💎 AI Tariflar (GO / PRO / PLUS)", "callback_data": "ai_arab=tariffs"}]]))
+                return
+            img_url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(text.strip())}?width=1024&height=1024&nologo=true&seed={random.randint(1, 99999)}"
+            bot(
+                "sendPhoto",
+                {
+                    "chat_id": cid,
+                    "photo": img_url,
+                    "caption": f"🎨 <b>AI Arab tomonidan yaratildi!</b>\n📊 {q_msg}",
+                    "parse_mode": "HTML",
+                },
+            )
+            return
+
+        ok_q, q_msg = _check_and_consume_ai_quota(cid, is_image=False)
+        if not ok_q:
+            sms(cid, q_msg, keyboard([[{"text": "💎 AI Tariflar (GO / PRO / PLUS)", "callback_data": "ai_arab=tariffs"}]]))
+            return
+        reply_txt = _call_gemini_api_text(cid, text.strip())
+        _, v_kb = _ai_arab_main_view(cid)
+        sms(cid, f"🤖 <b>AI Arab (Gemini):</b>\n\n{reply_txt}\n\n📊 <i>{q_msg}</i>", v_kb)
+        return
+
+    # ========================================================================
+    # BOSH ADMIN UCHUN MAXSUS BO'LIM: 🤖 AI ARAB SOZLAMALARI
+    # (Faqat Bosh Admin cid == ADMIN ko'ra oladi va boshqaradi!)
+    # ========================================================================
+
+    def _build_bosh_admin_ai_panel() -> Tuple[str, str]:
+        gem_k = _get_active_gemini_key()
+        masked_k = (gem_k[:10] + "..." + gem_k[-6:]) if len(gem_k) > 18 else gem_k
+        cfg = _get_ai_tariffs_config()
+        all_subs = database.fetch_all("SELECT * FROM `ai_subscriptions`")
+        paid_cnt = sum(1 for r in all_subs if r.get("plan") in ("GO", "PRO", "PLUS"))
+        tot_reqs = sum(int(r.get("total_requests") or 0) for r in all_subs)
+
+        bep, go, pro, plus = cfg["BEPUL"], cfg["GO"], cfg["PRO"], cfg["PLUS"]
+        txt = (
+            "🤖 <b>AI Arab (Gemini AI) — Bosh Admin Sozlamalari</b>\n"
+            "<i>(Ushbu bo‘lim faqat Bosh Admin uchun ko‘rinadi!)</i>\n\n"
+            f"🔑 <b>Gemini API Key:</b> <code>{masked_k}</code>\n"
+            f"👥 <b>Pullik AI obunachilar:</b> <b>{paid_cnt} ta</b> | 📊 <b>Jami so‘rovlar:</b> <b>{tot_reqs} ta</b>\n\n"
+            f"📋 <b>Joriy Tariflar va Limitlar (Kunlik / Haftalik / Rasm):</b>\n"
+            f"• 🆓 <b>BEPUL:</b> {bep['daily_limit']} kun / {bep['weekly_limit']} hafta / {bep['image_limit']} rasm (0 so‘m)\n"
+            f"• 🟢 <b>GO:</b> {go['daily_limit']} kun / {go['weekly_limit']} hafta / {go['image_limit']} rasm (1 oy: {fmt_money(go['base_monthly'])} so‘m)\n"
+            f"• 🔵 <b>PRO:</b> {pro['daily_limit']} kun / {pro['weekly_limit']} hafta / {pro['image_limit']} rasm (1 oy: {fmt_money(pro['base_monthly'])} so‘m)\n"
+            f"• 🟣 <b>PLUS:</b> {plus['daily_limit']} kun / {plus['weekly_limit']} hafta / {plus['image_limit']} rasm (1 oy: {fmt_money(plus['base_monthly'])} so‘m)\n\n"
+            "👇 <i>O‘zgartirmoqchi bo‘lgan sozlamani tanlang:</i>"
+        )
+        kb = keyboard([
+            [{"text": "🔑 Gemini API Keyni o‘zgartirish", "callback_data": "adm_ai=set_key"}],
+            [
+                {"text": "💰 GO narxi", "callback_data": "adm_ai=price_GO"},
+                {"text": "💰 PRO narxi", "callback_data": "adm_ai=price_PRO"},
+                {"text": "💰 PLUS narxi", "callback_data": "adm_ai=price_PLUS"},
+            ],
+            [
+                {"text": "📊 BEPUL limitlari", "callback_data": "adm_ai=lim_BEPUL"},
+                {"text": "📊 GO limitlari", "callback_data": "adm_ai=lim_GO"},
+            ],
+            [
+                {"text": "📊 PRO limitlari", "callback_data": "adm_ai=lim_PRO"},
+                {"text": "📊 PLUS limitlari (50 rasm)", "callback_data": "adm_ai=lim_PLUS"},
+            ],
+            [{"text": "🎁 Foydalanuvchiga AI Tarif berish / Limitni 0 qilish", "callback_data": "adm_ai=grant_user"}],
+        ])
+        return txt, kb
+
+    if text == "🤖 AI Arab sozlamalari":
+        if str(cid) != str(ADMIN):
+            sms(cid, "⛔️ <b>Ruxsat yo‘q!</b>\n«🤖 AI Arab sozlamalari» bo‘limini faqat <b>Bosh Admin (Ega)</b> ko‘ra oladi va boshqaradi!", get_dynamic_panel_kb(cid))
+            return
+        p_txt, p_kb = _build_bosh_admin_ai_panel()
+        sms(cid, p_txt, p_kb)
+        return
+
+    if data.startswith("adm_ai="):
+        if str(chat_id) != str(ADMIN):
+            bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "⛔️ Bu bo‘lim faqat Bosh Admin uchun ochiq!", "show_alert": True})
+            return
+        act = data.split("=", 1)[1]
+        if act == "home":
+            p_txt, p_kb = _build_bosh_admin_ai_panel()
+            edit(chat_id, message_id, p_txt, p_kb)
+        elif act == "set_key":
+            del_msg(chat_id, message_id)
+            sms(
+                chat_id,
+                f"🔑 <b>Yangi Google Gemini API Keyni yuboring:</b>\n\nJoriy kalit: <code>{_get_active_gemini_key()}</code>",
+                AORT_KB,
+            )
+            put_file(f"user/{chat_id}.step", "adm_ai_set_key")
+        elif act.startswith("price_"):
+            p_name = act.split("_", 1)[1].upper()
+            put_file("set/tmp_ai_plan.txt", p_name)
+            del_msg(chat_id, message_id)
+            sms(
+                chat_id,
+                f"💰 <b>AI Arab «{p_name}» tarifining 1 oylik (bazaviy) narxini kiriting (so‘mda):</b>\n\n"
+                "<i>(1 kun, 1 hafta, 3 oy, 6 oy va 1 yillik narxlar shu narxdan avtomatik hisoblanadi)</i>",
+                AORT_KB,
+            )
+            put_file(f"user/{chat_id}.step", "adm_ai_set_price")
+        elif act.startswith("lim_"):
+            p_name = act.split("_", 1)[1].upper()
+            put_file("set/tmp_ai_plan.txt", p_name)
+            del_msg(chat_id, message_id)
+            sms(
+                chat_id,
+                f"📊 <b>AI Arab «{p_name}» tarifi uchun yangi limitlarni bo‘sh joy bilan 3 ta raqamda yuboring:</b>\n\n"
+                "<code>KUNLIK HAFTALIK RASM</code>\n\n"
+                "<i>Masalan (PLUS tarifi uchun: kuniga 90 ta, haftasiga 400 ta, 50 ta rasm):</i>\n"
+                "<code>90 400 50</code>",
+                AORT_KB,
+            )
+            put_file(f"user/{chat_id}.step", "adm_ai_set_limits")
+        elif act == "grant_user":
+            del_msg(chat_id, message_id)
+            sms(
+                chat_id,
+                "🎁 <b>Foydalanuvchiga AI Tarif berish va limitini yangilash:</b>\n\n"
+                "Quyidagi formatda yuboring:\n"
+                "<code>TELEGRAM_ID TARIF KUNLAR</code>\n\n"
+                "<i>Masalan (PLUS tarifini 30 kunga berish):</i>\n"
+                "<code>123456789 PLUS 30</code>",
+                AORT_KB,
+            )
+            put_file(f"user/{chat_id}.step", "adm_ai_grant_user")
+        return
+
+    if step == "adm_ai_set_key" and str(cid) == str(ADMIN) and text:
+        put_file("set/gemini_api_key.txt", text.strip())
+        unlink_file(f"user/{cid}.step")
+        sms(cid, "✅ <b>Gemini API Key muvaffaqiyatli yangilandi!</b>", PANEL_KB)
+        return
+
+    if step == "adm_ai_set_price" and str(cid) == str(ADMIN) and text:
+        clean_v = text.strip().replace(" ", "")
+        p_name = get_file("set/tmp_ai_plan.txt").strip().lower()
+        if clean_v.replace(".", "", 1).isdigit() and p_name in ("go", "pro", "plus"):
+            put_file(f"set/ai_price_{p_name}_m.txt", clean_v)
+            unlink_file(f"user/{cid}.step")
+            sms(cid, f"✅ <b>AI Arab {p_name.upper()} tarifining oylik narxi {fmt_money(clean_v)} so‘m etib saqlandi!</b>", PANEL_KB)
+        else:
+            sms(cid, "⚠️ Faqat raqam kiriting (masalan: 50000):", AORT_KB)
+        return
+
+    if step == "adm_ai_set_limits" and str(cid) == str(ADMIN) and text:
+        parts = text.strip().split()
+        p_name = get_file("set/tmp_ai_plan.txt").strip().lower()
+        if len(parts) >= 3 and all(x.isdigit() for x in parts[:3]) and p_name in ("bepul", "go", "pro", "plus"):
+            put_file(f"set/ai_lim_{p_name}_d.txt", parts[0])
+            put_file(f"set/ai_lim_{p_name}_w.txt", parts[1])
+            put_file(f"set/ai_lim_{p_name}_i.txt", parts[2])
+            unlink_file(f"user/{cid}.step")
+            sms(
+                cid,
+                f"✅ <b>AI Arab {p_name.upper()} limitlari yangilandi!</b>\n"
+                f"• Kunlik: <b>{parts[0]} ta</b>\n"
+                f"• Haftalik: <b>{parts[1]} ta</b>\n"
+                f"• Rasm: <b>{parts[2]} ta</b>",
+                PANEL_KB,
+            )
+        else:
+            sms(cid, "⚠️ 3 ta raqamni bo‘sh joy bilan yuboring (masalan: <code>90 400 50</code>):", AORT_KB)
+        return
+
+    if step == "adm_ai_grant_user" and str(cid) == str(ADMIN) and text:
+        parts = text.strip().split()
+        if len(parts) >= 3 and parts[0].isdigit() and parts[1].upper() in ("BEPUL", "GO", "PRO", "PLUS") and parts[2].isdigit():
+            t_uid, t_plan, t_days = parts[0], parts[1].upper(), int(parts[2])
+            _get_user_ai_sub(t_uid)
+            exp_ts = time.time() + (t_days * 86400)
+            exp_str = datetime.datetime.fromtimestamp(exp_ts).strftime("%Y.%m.%d %H:%M")
+            database.execute(
+                """UPDATE `ai_subscriptions`
+                SET `plan` = ?, `expires_ts` = ?, `expires_str` = ?, `daily_used` = 0, `weekly_used` = 0, `images_used` = 0
+                WHERE `user_id` = ?""",
+                (t_plan, exp_ts, exp_str, t_uid),
+            )
+            unlink_file(f"user/{cid}.step")
+            sms(t_uid, f"🎁 <b>Bosh Admin tomonidan sizga AI Arab «{t_plan}» tarifi ({t_days} kunga) taqdim etildi!</b>")
+            sms(cid, f"✅ Foydalanuvchi (<code>{t_uid}</code>) uchun <b>{t_plan}</b> tarifi ({t_days} kun) yoqildi!", PANEL_KB)
+        else:
+            sms(cid, "⚠️ Format xato! Namuna: <code>123456789 PLUS 30</code>", AORT_KB)
+        return
+
 
     # ========================================================================
     # FOYDALANUVCHI: Buyurtma berish oqimi
