@@ -44,12 +44,10 @@ import os
 class Config:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-    # Telegram Bot va Gemini AI sozlamalari (ai arab gemini api key.txt faylidan o'rnatildi)
+    # Telegram Bot sozlamalari (@BotFather dan olingan token va Admin ID)
     BOT_TOKEN = os.getenv("BOT_TOKEN", "8655952088:AAGZq3Z5u-5r9onDaib-KO2K089J4jTHxJc")
     ADMIN_ID = os.getenv("ADMIN_ID", "6892561572")
     BOT_USERNAME = os.getenv("BOT_USERNAME", "ANTAARAB_SMM_ORG_BOT")
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6L4VDjV-bKHSiakB7ZZGIfEibQILHu0fmcIxJCfD_pWqw")
-    ENABLE_AI_ARAB = os.getenv("ENABLE_AI_ARAB", "1") == "1"
 
 
     # Sayt va Veb-server sozlamalari
@@ -307,18 +305,6 @@ class DatabaseModule:
             )""",
             "CREATE INDEX IF NOT EXISTS `idx_hosted_bots_owner` ON `hosted_bots` (`owner_id`)",
             "CREATE INDEX IF NOT EXISTS `idx_admins_uid` ON `admins` (`user_id`)",
-            """CREATE TABLE IF NOT EXISTS `ai_subscriptions` (
-                `user_id` TEXT PRIMARY KEY,
-                `plan` TEXT NOT NULL DEFAULT 'BEPUL',
-                `expires_ts` REAL NOT NULL DEFAULT 0,
-                `expires_str` TEXT NOT NULL DEFAULT 'Doimiy (Bepul)',
-                `daily_used` INTEGER NOT NULL DEFAULT 0,
-                `daily_date` TEXT NOT NULL DEFAULT '',
-                `weekly_used` INTEGER NOT NULL DEFAULT 0,
-                `weekly_key` TEXT NOT NULL DEFAULT '',
-                `images_used` INTEGER NOT NULL DEFAULT 0,
-                `total_requests` INTEGER NOT NULL DEFAULT 0
-            )""",
         ]
         for stmt in schema_statements:
             cur.execute(stmt)
@@ -1163,7 +1149,7 @@ def inspect_py_file_metadata(raw_bytes: bytes) -> Dict[str, Any]:
     return info
 
 
-def _build_configured_smm_source(b_token: str, b_admin: str, b_uname: str, enable_ai: bool = False) -> str:
+def _build_configured_smm_source(b_token: str, b_admin: str, b_uname: str) -> str:
     """To'liq mustaqil va xatosiz ishlaydigan SMM bot kodini berilgan Token, Admin ID va Tarif bo'yicha tayyorlaydi."""
     base_src = get_clean_bot_code_bytes().decode("utf-8", errors="replace")
     for tok_pat in ('"TOKEN_SHU_YERGA_YOZILADI"', '"8655952088:AAGZq3Z5u-5r9onDaib-KO2K089J4jTHxJc"'):
@@ -1181,11 +1167,6 @@ def _build_configured_smm_source(b_token: str, b_admin: str, b_uname: str, enabl
             f'BOT_USERNAME = os.getenv("BOT_USERNAME", {un_pat})',
             f'BOT_USERNAME = "{b_uname}"',
         )
-    ai_flag_str = "True" if enable_ai else "False"
-    base_src = base_src.replace(
-        'ENABLE_AI_ARAB = os.getenv("ENABLE_AI_ARAB", "1") == "1"',
-        f'ENABLE_AI_ARAB = {ai_flag_str}',
-    )
     base_src = base_src.replace(
         'PORT = int(os.getenv("PORT", "8000"))',
         'PORT = 0',
@@ -1550,9 +1531,8 @@ def deploy_and_start_hosted_bot(bot_row: Dict[str, Any], custom_py_bytes: Option
             f.write(patched_src)
         if meta.get("is_smm_bot"):
             _seed_child_bot_catalog_if_empty(bot_dir)
-    is_plus_bot = str(bot_row.get("tariff_plan", "")).strip().upper() == "PLUS"
     if custom_py_bytes is None and (not os.path.exists(runner_path) or bot_row.get("bot_category") == "smm"):
-        patched_src = _build_configured_smm_source(b_token, b_admin, b_uname, enable_ai=is_plus_bot)
+        patched_src = _build_configured_smm_source(b_token, b_admin, b_uname)
         with open(runner_path, "w", encoding="utf-8") as f:
             f.write(patched_src)
         _seed_child_bot_catalog_if_empty(bot_dir)
@@ -1568,7 +1548,6 @@ def deploy_and_start_hosted_bot(bot_row: Dict[str, Any], custom_py_bytes: Option
     env["BOT_TOKEN"] = b_token
     env["ADMIN_ID"] = b_admin
     env["BOT_USERNAME"] = b_uname
-    env["ENABLE_AI_ARAB"] = "1" if is_plus_bot else "0"
     env["PORT"] = "0"
     env["PYTHONPATH"] = bot_dir
 
@@ -1591,7 +1570,7 @@ def deploy_and_start_hosted_bot(bot_row: Dict[str, Any], custom_py_bytes: Option
                 log_file.close()
             except Exception:
                 pass
-            fallback_src = _build_configured_smm_source(b_token, b_admin, b_uname, enable_ai=is_plus_bot)
+            fallback_src = _build_configured_smm_source(b_token, b_admin, b_uname)
             with open(runner_path, "w", encoding="utf-8") as f:
                 f.write(fallback_src)
             _seed_child_bot_catalog_if_empty(bot_dir)
@@ -1718,7 +1697,7 @@ def send_document(
 def send_photo_bytes(
     chat_id: Union[str, int],
     photo_bytes: bytes,
-    filename: str = "ai_arab.jpg",
+    filename: str = "photo.jpg",
     caption: str = "",
     reply_markup: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -2087,7 +2066,6 @@ AORT_KB = reply_keyboard([[{"text": "🗄️ Boshqaruv"}]])
 PANEL_KB = reply_keyboard([
     [{"text": "⚙️ Asosiy sozlamalar"}, {"text": "💳 Hamyonlar sozlamalari"}],
     [{"text": "💵 Pul ishlash sozlamalari"}, {"text": "👑 Admin qo‘shish"}],
-    [{"text": "🤖 AI Arab sozlamalari"}],
     [{"text": "🔔 Xabar yuborish"}, {"text": "📊 Statistika"}],
     [{"text": "👤 Foydalanuvchini boshqarish"}],
     [{"text": "🇺🇿 Valyuta kursi"}, {"text": "⏰ Cron sozlamasi"}],
@@ -2174,17 +2152,15 @@ PANEL2_KB = reply_keyboard([
     [{"text": "🗄️ Boshqaruv"}],
 ])
 
-_TOP_MENU_ROW = [{"text": "➕ Buyurtma berish"}, {"text": "🤖 AI Arab"}] if config.ENABLE_AI_ARAB else [{"text": "➕ Buyurtma berish"}]
-
 MENU_USER_KB = reply_keyboard([
-    _TOP_MENU_ROW,
+    [{"text": "➕ Buyurtma berish"}],
     [{"text": "🛒 Buyurtmalar"}, {"text": "💵 Pul ishlash"}],
     [{"text": "💳 Balans"}, {"text": "💳 Pul kiritish"}],
     [{"text": "☎️ Yordam"}, {"text": "🤝 Hamkorlik dasturi"}],
 ])
 
 MENU_ADMIN_KB = reply_keyboard([
-    _TOP_MENU_ROW,
+    [{"text": "➕ Buyurtma berish"}],
     [{"text": "🛒 Buyurtmalar"}, {"text": "💵 Pul ishlash"}],
     [{"text": "💳 Balans"}, {"text": "💳 Pul kiritish"}],
     [{"text": "☎️ Yordam"}, {"text": "🤝 Hamkorlik dasturi"}],
@@ -2852,9 +2828,6 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
             "➡ Orqaga": "➡️ Orqaga",
             "🗑 O'chirish": "🗑️ O‘chirish",
             "❌ Bekor qilish": "❌ Bekor qilish",
-            "AI Arab": "🤖 AI Arab",
-            "ai arab": "🤖 AI Arab",
-            "🤖 ai arab": "🤖 AI Arab",
         }
         if clean_t in button_aliases:
             text = button_aliases[clean_t]
@@ -2864,20 +2837,6 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
     stepc = get_file(f"user/{chat_id}.step").strip() if chat_id else ""
     saved = get_file("user/us.id").strip()
 
-    # Agar foydalanuvchi AI Arab xabariga "Reply" qilib yozsa yoki /ai deb yozsa, step bo'sh bo'lsa ham AI Arab rejimini tiklaymiz
-    if message and cid and text and config.ENABLE_AI_ARAB:
-        rep_msg = message.get("reply_to_message") or {}
-        rep_txt = str(rep_msg.get("text") or rep_msg.get("caption") or "")
-        if "Rasm Yaratish Rejimi" in rep_txt:
-            step = "ai_arab_draw"
-            put_file(f"user/{cid}.step", "ai_arab_draw")
-        elif "AI Arab" in rep_txt and not step:
-            step = "ai_arab_chat"
-            put_file(f"user/{cid}.step", "ai_arab_chat")
-        elif text.lower().startswith("/ai "):
-            text = text[4:].strip()
-            step = "ai_arab_chat"
-            put_file(f"user/{cid}.step", "ai_arab_chat")
 
     is_admin = is_admin_id(cid) or is_admin_id(chat_id)
     m_kb = MENU_ADMIN_KB if is_admin else MENU_USER_KB
@@ -2942,12 +2901,12 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
     # Agar foydalanuvchi asosiy menyu tugmalaridan birini bossa, eski tugallanmagan step'ni tozalaymiz
     MAIN_BUTTONS = {
         "/start", "/admin", "/panel", "➡️ Orqaga", "⏪ Orqaga", "🗄️ Boshqaruv",
-        "⚙️ Asosiy sozlamalar", "💳 Hamyonlar sozlamalari", "💵 Pul ishlash sozlamalari", "👑 Admin qo‘shish", "🤖 AI Arab sozlamalari", "🔔 Xabar yuborish",
+        "⚙️ Asosiy sozlamalar", "💳 Hamyonlar sozlamalari", "💵 Pul ishlash sozlamalari", "👑 Admin qo‘shish", "🔔 Xabar yuborish",
         "📊 Statistika", "👤 Foydalanuvchini boshqarish", "🇺🇿 Valyuta kursi",
         "⏰ Cron sozlamasi", "🛍 Buyurtmalarni sozlash",
         "💵 Kursni o‘rnatish", "⚖️ Foizni o‘rnatish", "📊 Buyurtmani tekshirish",
         "📎 Majburiy obunalar", "🔑 API Sozlamalari", "⚙️ Boshqa sozlamalar",
-        "➕ Buyurtma berish", "🤖 AI Arab", "🛒 Buyurtmalar", "💵 Pul ishlash",
+        "➕ Buyurtma berish", "🛒 Buyurtmalar", "💵 Pul ishlash",
         "💳 Balans", "💳 Pul kiritish", "☎️ Yordam", "🤝 Hamkorlik dasturi",
     }
     if text in MAIN_BUTTONS and step:
@@ -3680,16 +3639,14 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
                 f"🟢 <b>GO Tarifi — {go_p} so‘m / oy</b>\n"
                 f"• ⚙️ 1 ta Telegram Bot (24/7 uzluksiz ishlash)\n"
                 f"• 💾 512 MB RAM | 5 GB SSD xotira\n"
-                f"• ❌ <i>AI Arab (Gemini AI) buyruqlari chiqmaydi</i>\n\n"
+                f"\n"
                 f"🔵 <b>PRO Tarifi — {pro_p} so‘m / oy</b>\n"
                 f"• ⚡ Yuqori tezlik (TURBO 24/7) | 1 GB RAM | 15 GB SSD\n"
                 f"• 🛡 DDoS himoya + Avto-restart\n"
-                f"• ❌ <i>AI Arab (Gemini AI) buyruqlari chiqmaydi</i>\n\n"
+                f"\n"
                 f"🟣 <b>PLUS Tarifi — {plus_p} so‘m / oy (VIP)</b>\n"
                 f"• 👑 Maksimal tezlik | 2 GB RAM | 30 GB NVMe SSD\n"
-                f"• 🤖 <b>ЭКСКЛЮЗИВ: Bot ichida «🤖 AI Arab (Gemini AI)» funksiyasi, rasm chizish va AI tariflar to‘liq ishlaydi!</b>\n"
                 f"• 🚀 100% Uptime kafolati + VIP yordam\n\n"
-                f"⚠️ <i>Eslatma: «🤖 AI Arab» komandalari va bo‘limi faqatgina <b>PLUS</b> tarifida ochilgan botlarda ishlaydi, undan past tariflarda (GO va PRO) bu komandalar chiqmaydi!</i>\n\n"
                 f"💵 <b>Sizning balansingiz:</b> <b>{u_bal_str} so‘m</b>\n\n"
                 f"👇 <i>O‘zingizga mos server tarifini tanlang:</i>",
                 keyboard([
@@ -3722,7 +3679,7 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
                 f"• Sizga bot kodi berilmaydi va dasturlash talab qilinmaydi!\n"
                 f"• Faqatgina @BotFather dan olgan <b>Token</b>, <b>Admin ID</b> va <b>Bot useri (@username)</b> ni yuborasiz.\n"
                 f"• Serverimiz botingizni <b>avtomatik to‘g‘irlab, 24/7 rejimda darhol ishga tushirib beradi!</b>\n"
-                f"• ℹ️ <i>Eslatma: Standart SMM Bot tarifida «🤖 AI Arab» bo‘limi bo‘lmaydi. Botingizda «🤖 AI Arab (Gemini AI)» ham bo‘lishini xohlasangiz, «🖥 Bo‘tni serverga qo‘yish ➡️ 🟣 PLUS» tarifidan foydalaning!</i>\n\n"
+                f"\n"
                 f"{trial_badge}\n"
                 f"💵 <b>Sizning balansingiz:</b> <b>{u_bal_str} so‘m</b>\n\n"
                 f"👇 <i>Boshlash uchun quyidagi tugmani bosing:</i>",
@@ -6613,959 +6570,6 @@ def _handle_update_core(update: Dict[str, Any], host: str = "") -> None:
                 put_file("payments.txt", f"\n{checkid}", append=True)
                 sms(ADMIN, f"💳 Hisob to'ldirildi\n👤 Foydalanuvchi: {chat_id}\n💰 Summa: {plus} so'm")
         return
-
-    # ========================================================================
-    # 🤖 AI ARAB — HAQIQIY CHATGPT / DEEPSEEK / GEMINI USLUBIDAGI SUN'IY INTELLEKT
-    #    + GOOGLE GEMINI 2.5 FLASH + CHATGPT (GPT-4o) + DEEPSEEK V3/R1
-    #    + 20 XABARLI SUHBAT XOTIRASI + VISION (RASM TAHLILI) + RASM YARATISH
-    #    + TARIFLAR (BEPUL, GO, PRO, PLUS) VA 6 XIL MUDDAT
-    # ========================================================================
-
-    def _get_active_gemini_key() -> str:
-        saved_k = get_file("set/gemini_api_key.txt").strip()
-        return saved_k if saved_k else config.GEMINI_API_KEY
-
-    def _get_ai_tariffs_config() -> Dict[str, Dict[str, Any]]:
-        return {
-            "BEPUL": {
-                "name": "🆓 BEPUL",
-                "daily_limit": int(float(get_file("set/ai_lim_bepul_d.txt").strip() or 5)),
-                "weekly_limit": int(float(get_file("set/ai_lim_bepul_w.txt").strip() or 15)),
-                "image_limit": int(float(get_file("set/ai_lim_bepul_i.txt").strip() or 1)),
-                "base_monthly": 0.0,
-            },
-            "GO": {
-                "name": "🟢 GO",
-                "daily_limit": int(float(get_file("set/ai_lim_go_d.txt").strip() or 20)),
-                "weekly_limit": int(float(get_file("set/ai_lim_go_w.txt").strip() or 90)),
-                "image_limit": int(float(get_file("set/ai_lim_go_i.txt").strip() or 10)),
-                "base_monthly": float(get_file("set/ai_price_go_m.txt").strip() or 15000),
-            },
-            "PRO": {
-                "name": "🔵 PRO",
-                "daily_limit": int(float(get_file("set/ai_lim_pro_d.txt").strip() or 45)),
-                "weekly_limit": int(float(get_file("set/ai_lim_pro_w.txt").strip() or 200)),
-                "image_limit": int(float(get_file("set/ai_lim_pro_i.txt").strip() or 25)),
-                "base_monthly": float(get_file("set/ai_price_pro_m.txt").strip() or 30000),
-            },
-            "PLUS": {
-                "name": "🟣 PLUS",
-                "daily_limit": int(float(get_file("set/ai_lim_plus_d.txt").strip() or 90)),
-                "weekly_limit": int(float(get_file("set/ai_lim_plus_w.txt").strip() or 400)),
-                "image_limit": int(float(get_file("set/ai_lim_plus_i.txt").strip() or 50)),
-                "base_monthly": float(get_file("set/ai_price_plus_m.txt").strip() or 50000),
-            },
-        }
-
-    AI_DURATION_OPTIONS: Dict[str, Dict[str, Any]] = {
-        "1d": {"label": "1 kun", "days": 1, "mult": 0.12},
-        "1w": {"label": "1 hafta (7 kun)", "days": 7, "mult": 0.36},
-        "1m": {"label": "1 oy (30 kun)", "days": 30, "mult": 1.0},
-        "3m": {"label": "3 oy (90 kun)", "days": 90, "mult": 2.6},
-        "6m": {"label": "6 oy (180 kun)", "days": 180, "mult": 4.8},
-        "1y": {"label": "1 yil (365 kun)", "days": 365, "mult": 9.0},
-    }
-
-    AI_MODELS_CATALOG: Dict[str, Dict[str, str]] = {
-        "gemini": {
-            "label": "⚡ Gemini 2.5",
-            "full": "⚡ Gemini 2.5 Flash (Google)",
-            "pollinations": "gemini",
-            "desc": "Tezkor, aqlli va rasmni tushunuvchi Google Gemini modeli",
-        },
-        "chatgpt": {
-            "label": "🧠 ChatGPT",
-            "full": "🧠 ChatGPT (GPT-4o)",
-            "pollinations": "openai",
-            "desc": "Har tomonlama batafsil va tabiiy suhbatdosh (OpenAI)",
-        },
-        "deepseek": {
-            "label": "🐋 DeepSeek",
-            "full": "🐋 DeepSeek (V3 / R1)",
-            "pollinations": "deepseek",
-            "desc": "Chuqur mantiqiy fikrlash, matematika va dasturlash ustasi",
-        },
-    }
-
-    def _get_user_ai_model(user_uid: str) -> str:
-        m = get_file(f"user/{user_uid}.ai_model").strip().lower()
-        return m if m in AI_MODELS_CATALOG else "gemini"
-
-    def _calc_ai_plan_price(plan_key: str, dur_key: str) -> float:
-        cfg = _get_ai_tariffs_config()
-        base_m = float(cfg.get(plan_key, {}).get("base_monthly") or 15000)
-        mult = float(AI_DURATION_OPTIONS.get(dur_key, {}).get("mult") or 1.0)
-        raw_p = base_m * mult
-        return float(max(1000, int(round(raw_p / 500.0) * 500)))
-
-    def _get_user_ai_sub(user_uid: str) -> Dict[str, Any]:
-        u_str = str(user_uid).strip()
-        today_str = datetime.datetime.now().strftime("%Y-%m-%d")
-        week_str = datetime.datetime.now().strftime("%Y-W%W")
-        row = database.fetch_one("SELECT * FROM `ai_subscriptions` WHERE `user_id` = ?", (u_str,))
-        if not row:
-            database.execute(
-                """INSERT OR IGNORE INTO `ai_subscriptions`
-                (`user_id`, `plan`, `expires_ts`, `expires_str`, `daily_used`, `daily_date`, `weekly_used`, `weekly_key`, `images_used`, `total_requests`)
-                VALUES (?, 'BEPUL', 0, 'Doimiy (Bepul)', 0, ?, 0, ?, 0, 0)""",
-                (u_str, today_str, week_str),
-            )
-            row = database.fetch_one("SELECT * FROM `ai_subscriptions` WHERE `user_id` = ?", (u_str,)) or {
-                "user_id": u_str, "plan": "BEPUL", "expires_ts": 0, "expires_str": "Doimiy (Bepul)",
-                "daily_used": 0, "daily_date": today_str, "weekly_used": 0, "weekly_key": week_str,
-                "images_used": 0, "total_requests": 0,
-            }
-
-        changed = False
-        if row.get("plan") != "BEPUL" and float(row.get("expires_ts") or 0) > 0 and time.time() >= float(row["expires_ts"]):
-            row["plan"] = "BEPUL"
-            row["expires_ts"] = 0
-            row["expires_str"] = "Muddati tugagan (BEPUL)"
-            row["images_used"] = 0
-            changed = True
-
-        if row.get("daily_date") != today_str:
-            row["daily_date"] = today_str
-            row["daily_used"] = 0
-            changed = True
-
-        if row.get("weekly_key") != week_str:
-            row["weekly_key"] = week_str
-            row["weekly_used"] = 0
-            changed = True
-
-        if changed:
-            database.execute(
-                """UPDATE `ai_subscriptions`
-                SET `plan` = ?, `expires_ts` = ?, `expires_str` = ?, `daily_used` = ?, `daily_date` = ?, `weekly_used` = ?, `weekly_key` = ?, `images_used` = ?
-                WHERE `user_id` = ?""",
-                (
-                    row["plan"], row["expires_ts"], row["expires_str"],
-                    row["daily_used"], row["daily_date"], row["weekly_used"], row["weekly_key"],
-                    row["images_used"], u_str,
-                ),
-            )
-        return row
-
-    def _check_and_consume_ai_quota(user_uid: str, is_image: bool = False) -> Tuple[bool, str]:
-        u_str = str(user_uid).strip()
-        if u_str == str(ADMIN):
-            return True, "♾ Bosh Admin (Cheksiz)"
-
-        sub = _get_user_ai_sub(u_str)
-        plan_key = str(sub.get("plan") or "BEPUL").upper()
-        cfg = _get_ai_tariffs_config()
-        p_info = cfg.get(plan_key, cfg["BEPUL"])
-
-        d_used = int(sub.get("daily_used") or 0)
-        w_used = int(sub.get("weekly_used") or 0)
-        i_used = int(sub.get("images_used") or 0)
-
-        d_lim = int(p_info["daily_limit"])
-        w_lim = int(p_info["weekly_limit"])
-        i_lim = int(p_info["image_limit"])
-
-        if is_image and i_used >= i_lim:
-            return False, (
-                f"⛔️ <b>Rasm yaratish limitingiz tugadi!</b>\n\n"
-                f"🏷 Tarif: <b>{p_info['name']}</b> | 🎨 Limit: <b>{i_used}/{i_lim} ta</b>\n"
-                f"👇 Limitni oshirish uchun <b>«💎 AI Tariflar»</b> tugmasini bosing."
-            )
-        if d_used >= d_lim:
-            return False, (
-                f"⛔️ <b>Kunlik AI so‘rov limitingiz tugadi!</b>\n\n"
-                f"🏷 Tarif: <b>{p_info['name']}</b> | 💬 Kunlik: <b>{d_used}/{d_lim} ta</b>\n"
-                f"👇 Limitni oshirish uchun <b>«💎 AI Tariflar»</b> tugmasini bosing."
-            )
-        if w_used >= w_lim:
-            return False, (
-                f"⛔️ <b>Haftalik AI so‘rov limitingiz tugadi!</b>\n\n"
-                f"🏷 Tarif: <b>{p_info['name']}</b> | 📅 Haftalik: <b>{w_used}/{w_lim} ta</b>\n"
-                f"👇 Limitni oshirish uchun <b>«💎 AI Tariflar»</b> tugmasini bosing."
-            )
-
-        new_d = d_used + 1
-        new_w = w_used + 1
-        new_i = i_used + (1 if is_image else 0)
-        new_tot = int(sub.get("total_requests") or 0) + 1
-        database.execute(
-            """UPDATE `ai_subscriptions`
-            SET `daily_used` = ?, `weekly_used` = ?, `images_used` = ?, `total_requests` = ?
-            WHERE `user_id` = ?""",
-            (new_d, new_w, new_i, new_tot, u_str),
-        )
-        rem_d = max(0, d_lim - new_d)
-        rem_i = max(0, i_lim - new_i)
-        return True, f"{p_info['name']} · Qoldiq: {rem_d}/{d_lim} · 🎨 {rem_i}/{i_lim}"
-
-    def _md_to_tg_html(md_text: str) -> str:
-        """ChatGPT / DeepSeek / Gemini Markdown javoblarini toza Telegram HTML formatiga o'giradi."""
-        if not md_text:
-            return ""
-        # DeepSeek <think>...</think> qismini chiroyli blockquote yoki olib tashlash
-        md_text = re.sub(r"<think>.*?</think>", "", md_text, flags=re.DOTALL).strip()
-
-        # 1. Kod bloklarini (```lang\n...\n```) vaqtincha himoyalaymiz
-        code_blocks: List[str] = []
-        def _store_block(m: re.Match) -> str:
-            lang = (m.group(1) or "").strip()
-            body = m.group(2)
-            body_esc = body.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            cls_attr = f' class="language-{lang}"' if lang else ""
-            code_blocks.append(f"<pre><code{cls_attr}>{body_esc}</code></pre>")
-            return f"@@CODEBLOCK_{len(code_blocks) - 1}@@"
-
-        text_work = re.sub(r"```([a-zA-Z0-9_+-]*)\n?(.*?)```", _store_block, md_text, flags=re.DOTALL)
-
-        # 2. Inline `code` larni himoyalaymiz
-        inline_codes: List[str] = []
-        def _store_inline(m: re.Match) -> str:
-            inner = m.group(1).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            inline_codes.append(f"<code>{inner}</code>")
-            return f"@@INLINECODE_{len(inline_codes) - 1}@@"
-
-        text_work = re.sub(r"`([^`\n]+)`", _store_inline, text_work)
-
-        # 3. Oddiy matndagi HTML belgilarni xavfsiz qilamiz
-        text_work = text_work.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-        # 4. Sarlavhalar (### Sarlavha -> <b>Sarlavha</b>)
-        text_work = re.sub(r"^#{1,6}\s+(.+)$", r"<b>\1</b>", text_work, flags=re.MULTILINE)
-        # 5. Bold (**matn** -> <b>matn</b>)
-        text_work = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text_work, flags=re.DOTALL)
-        # 6. Italic (*matn* -> <i>matn</i>)
-        text_work = re.sub(r"(?<!\*)\*([^\*\n]+?)\*(?!\*)", r"<i>\1</i>", text_work)
-        # 7. Ro'yxat nuqtalari (- item yoki * item -> • item)
-        text_work = re.sub(r"^[\-\*]\s+", "• ", text_work, flags=re.MULTILINE)
-
-        # 8. Himoyalangan kod bloklarini joyiga qaytaramiz
-        for idx, blk in enumerate(code_blocks):
-            text_work = text_work.replace(f"@@CODEBLOCK_{idx}@@", blk)
-        for idx, ic in enumerate(inline_codes):
-            text_work = text_work.replace(f"@@INLINECODE_{idx}@@", ic)
-
-        return text_work.strip()
-
-    def _looks_like_image_prompt(txt_in: str) -> bool:
-        """Faqat aniq rasm chizish buyrug'ini ('rasm chiz', 'moshinani rasmi', 'draw ...') ajratadi."""
-        low = txt_in.lower().strip()
-        if len(low) > 180:
-            return False
-        explicit_starts = ("rasm chiz", "rasm yarat", "rasmini chiz", "rasmini yarat", "surat chiz", "draw ", "generate image")
-        if any(low.startswith(p) for p in explicit_starts):
-            return True
-        if re.search(r"\b(rasmi|rasmini|rasm chiz|rasm yarat|surati|suratini)\b", low):
-            # Agar "rasm qanday chiziladi" kabi savol bo'lsa, matnli javob beramiz
-            if any(q in low for q in ("qanday", "nima", "nega", "haqida", "tushuntir")):
-                return False
-            return True
-        return False
-
-    def _translate_uz_prompt_to_en(raw_prompt: str) -> Tuple[str, str]:
-        clean = raw_prompt.lower().strip()
-        for noise in (
-            "rasmini chizib ber", "rasmini chiz", "rasm chizib ber", "rasm chiz",
-            "rasmini yarat", "rasm yarat", "rasmini ko'rsat", "rasmini", "rasmi",
-            "suratini", "surati", "fotosi", "rasm:", "rasm", "chizib ber", "chiz",
-        ):
-            clean = re.sub(r"\b" + re.escape(noise) + r"\b", " ", clean)
-        clean = " ".join(clean.split()).strip() or raw_prompt.strip()
-        en_phrase = clean
-        try:
-            tr_url = "http://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q=" + urllib.parse.quote(clean)
-            req = urllib.request.Request(tr_url, headers=_BROWSER_HEADERS)
-            with urllib.request.urlopen(req, context=_UNVERIFIED_SSL_CTX, timeout=2.5) as resp:
-                parsed = json.loads(resp.read().decode("utf-8", errors="replace"))
-                tr_res = str(parsed[0][0][0]).strip()
-                if tr_res:
-                    en_phrase = tr_res
-        except Exception:
-            pass
-        first_w = re.sub(r"[^a-zA-Z]", "", en_phrase.split()[0]) if en_phrase.split() else "art"
-        return f"{en_phrase}, ultra detailed, photorealistic, high quality, 8k", (first_w.lower() or "art")
-
-    def _create_fallback_valid_png(title_text: str = "AI Arab") -> bytes:
-        w, h = 640, 400
-        raw_rows = bytearray()
-        for y in range(h):
-            raw_rows.append(0)
-            r_val = int(20 + (y / h) * 80)
-            g_val = int(30 + (y / h) * 140)
-            b_val = int(90 + (y / h) * 155)
-            raw_rows.extend(bytes((r_val, g_val, b_val)) * w)
-
-        def _png_chunk(c_type: bytes, c_data: bytes) -> bytes:
-            crc = zlib.crc32(c_type + c_data) & 0xFFFFFFFF
-            return struct.pack(">I", len(c_data)) + c_type + c_data + struct.pack(">I", crc)
-
-        ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
-        idat = zlib.compress(bytes(raw_rows), level=6)
-        return b"\x89PNG\r\n\x1a\n" + _png_chunk(b"IHDR", ihdr) + _png_chunk(b"IDAT", idat) + _png_chunk(b"IEND", b"")
-
-    def _generate_ai_image_bytes(user_prompt: str) -> Tuple[bytes, str]:
-        en_full_prompt, en_tag = _translate_uz_prompt_to_en(user_prompt)
-        seed = random.randint(100, 999999)
-        result_q: "queue.Queue[Tuple[bytes, str]]" = queue.Queue()
-
-        def _is_valid_img_bytes(b: bytes) -> bool:
-            if not b or len(b) < 2500:
-                return False
-            return b.startswith(b"\xff\xd8") or b.startswith(b"\x89PNG") or b.startswith(b"RIFF")
-
-        def _worker_pollinations() -> None:
-            for model_n in ("flux", "turbo"):
-                try:
-                    u = (
-                        f"https://image.pollinations.ai/prompt/{urllib.parse.quote(en_full_prompt)}"
-                        f"?width=1024&height=1024&nologo=true&model={model_n}&seed={seed}"
-                    )
-                    req = urllib.request.Request(u, headers=_BROWSER_HEADERS)
-                    with urllib.request.urlopen(req, context=_UNVERIFIED_SSL_CTX, timeout=14.0) as resp:
-                        data = resp.read()
-                        if _is_valid_img_bytes(data):
-                            result_q.put((data, "ai_arab_image.jpg"))
-                            return
-                except Exception:
-                    pass
-
-        def _worker_gen_pollinations() -> None:
-            try:
-                u = f"https://gen.pollinations.ai/image/{urllib.parse.quote(en_full_prompt)}?width=1024&height=1024&nologo=true&seed={seed}"
-                req = urllib.request.Request(u, headers=_BROWSER_HEADERS)
-                with urllib.request.urlopen(req, context=_UNVERIFIED_SSL_CTX, timeout=14.0) as resp:
-                    data = resp.read()
-                    if _is_valid_img_bytes(data):
-                        result_q.put((data, "ai_arab_gen.jpg"))
-                        return
-            except Exception:
-                pass
-
-        for target_fn in (_worker_pollinations, _worker_gen_pollinations):
-            threading.Thread(target=target_fn, daemon=True).start()
-
-        try:
-            return result_q.get(timeout=15.0)
-        except Exception:
-            # Zaxira: Wikimedia real rasm
-            try:
-                api_u = (
-                    "https://commons.wikimedia.org/w/api.php?action=query&generator=search"
-                    f"&gsrsearch=filetype:bitmap+{urllib.parse.quote(en_tag)}&gsrlimit=4"
-                    "&prop=imageinfo&iiprop=url&iiurlwidth=800&format=json"
-                )
-                req = urllib.request.Request(api_u, headers=_BROWSER_HEADERS)
-                with urllib.request.urlopen(req, context=_UNVERIFIED_SSL_CTX, timeout=4.0) as resp:
-                    j = json.loads(resp.read().decode("utf-8", errors="replace"))
-                for p in (j.get("query", {}).get("pages") or {}).values():
-                    ii = (p.get("imageinfo") or [{}])[0]
-                    thumb_u = ii.get("thumburl") or ii.get("url") or ""
-                    if thumb_u:
-                        req_i = urllib.request.Request(thumb_u, headers=_BROWSER_HEADERS)
-                        with urllib.request.urlopen(req_i, context=_UNVERIFIED_SSL_CTX, timeout=4.0) as ri:
-                            ib = ri.read()
-                            if _is_valid_img_bytes(ib):
-                                return ib, "ai_arab_photo.jpg"
-            except Exception:
-                pass
-            return _create_fallback_valid_png(user_prompt), "ai_arab_art.png"
-
-    def _call_real_llm_chat(
-        user_uid: str,
-        user_question: str,
-        image_b64: Optional[str] = None,
-    ) -> Tuple[str, str]:
-        """
-        Haqiqiy ChatGPT / DeepSeek / Gemini kabi jonli LLM chaqiruvi!
-        Hech qanday qotib qolgan shablon javob YO'Q.
-        Qaytaradi: (raw_markdown_answer, model_used_label)
-        """
-        model_choice = _get_user_ai_model(user_uid)
-        m_meta = AI_MODELS_CATALOG.get(model_choice, AI_MODELS_CATALOG["gemini"])
-        gem_key = _get_active_gemini_key()
-
-        hist_raw = get_file(f"user/{user_uid}.ai_hist.json").strip()
-        try:
-            history: List[Dict[str, str]] = json.loads(hist_raw) if hist_raw else []
-        except Exception:
-            history = []
-
-        style_notes = {
-            "gemini": "Sen Google Gemini 2.5 Flash darajasidagi aqlli, tabiiy va tezkor AI yordamchisan.",
-            "chatgpt": "Sen ChatGPT (GPT-4o) darajasidagi juda tushunarli, batafsil va do'stona AI yordamchisan.",
-            "deepseek": "Sen DeepSeek R1/V3 darajasidagi kuchli mantiqiy tahlil, matematika va dasturlash bo'yicha ekspert AI yordamchisan.",
-        }
-        sys_instruction = (
-            f"{style_notes.get(model_choice, style_notes['gemini'])} "
-            "Foydalanuvchi bilan xuddi haqiqiy ChatGPT, DeepSeek va Gemini kabi tabiiy, aqlli va jonli muloqot qil. "
-            "Foydalanuvchi qaysi tilda yozsa (asosan o'zbek tilida), o'sha tilda javob ber. "
-            "Har qanday mavzuda — kundalik suhbat, dasturlash, tarjima, matematika, insho, biznes, SMM, kod yozish va tahlil — mukammal javob ber. "
-            "Oddiy 'salom' desa ham tabiiy va qisqa salomlashib, nima bilan yordam bera olishingni so'ra (uzun reklama matni yozma!)."
-        )
-
-        # --- 1) Google Gemini REST API (AI Studio + Vertex Express har ikkala endpoint) ---
-        def _try_google_gemini() -> Optional[str]:
-            if not gem_key:
-                return None
-            gemini_contents: List[Dict[str, Any]] = []
-            for h in history[-16:]:
-                role_g = "user" if h.get("role") == "user" else "model"
-                gemini_contents.append({"role": role_g, "parts": [{"text": str(h.get("content", ""))}]})
-            user_parts: List[Dict[str, Any]] = []
-            if image_b64:
-                user_parts.append({"inline_data": {"mime_type": "image/jpeg", "data": image_b64}})
-            user_parts.append({"text": user_question or "Ushbu rasmni batafsil tahlil qilib tushuntirib ber."})
-            gemini_contents.append({"role": "user", "parts": user_parts})
-
-            payload = json.dumps({
-                "system_instruction": {"parts": [{"text": sys_instruction}]},
-                "contents": gemini_contents,
-                "generationConfig": {"temperature": 0.75, "maxOutputTokens": 2048},
-            }).encode("utf-8")
-
-            endpoints = [
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={urllib.parse.quote(gem_key)}",
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={urllib.parse.quote(gem_key)}",
-            ]
-            if gem_key.startswith("AQ."):
-                endpoints.extend([
-                    f"https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-flash:generateContent?key={urllib.parse.quote(gem_key)}",
-                    f"https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.0-flash:generateContent?key={urllib.parse.quote(gem_key)}",
-                ])
-
-            for url_g in endpoints:
-                try:
-                    hdrs = {"Content-Type": "application/json", "x-goog-api-key": gem_key}
-                    req = urllib.request.Request(url_g, data=payload, headers=hdrs, method="POST")
-                    with urllib.request.urlopen(req, context=_UNVERIFIED_SSL_CTX, timeout=16.0) as resp:
-                        res_data = json.loads(resp.read().decode("utf-8", errors="replace"))
-                        cands = res_data.get("candidates") or []
-                        if cands:
-                            parts = cands[0].get("content", {}).get("parts") or []
-                            txt_joined = "".join(str(p.get("text", "")) for p in parts if p.get("text")).strip()
-                            if txt_joined:
-                                return txt_joined
-                except Exception:
-                    continue
-            return None
-
-        # --- 2) OpenAI / DeepSeek / Gemini Live LLM Gateway (Pollinations OpenAI-compatible) ---
-        def _try_openai_compatible(pref_model: str) -> Optional[str]:
-            msgs: List[Dict[str, Any]] = [{"role": "system", "content": sys_instruction}]
-            for h in history[-16:]:
-                msgs.append({"role": h.get("role", "user"), "content": str(h.get("content", ""))})
-            if image_b64:
-                msgs.append({
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": user_question or "Ushbu rasmni batafsil tahlil qilib tushuntirib ber."},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
-                    ],
-                })
-            else:
-                msgs.append({"role": "user", "content": user_question})
-
-            model_candidates = [pref_model]
-            for m_fb in ("openai", "deepseek", "gemini", "mistral"):
-                if m_fb not in model_candidates:
-                    model_candidates.append(m_fb)
-
-            api_urls = [
-                "https://text.pollinations.ai/openai",
-                "https://gen.pollinations.ai/v1/chat/completions",
-            ]
-            for m_name in model_candidates[:3]:
-                for api_u in api_urls:
-                    try:
-                        body = json.dumps({
-                            "model": m_name,
-                            "messages": msgs,
-                            "temperature": 0.75,
-                            "private": True,
-                        }).encode("utf-8")
-                        req = urllib.request.Request(
-                            api_u,
-                            data=body,
-                            headers={
-                                "Content-Type": "application/json",
-                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                            },
-                            method="POST",
-                        )
-                        with urllib.request.urlopen(req, context=_UNVERIFIED_SSL_CTX, timeout=18.0) as resp:
-                            raw = resp.read().decode("utf-8", errors="replace").strip()
-                            if not raw or "<!DOCTYPE" in raw[:120]:
-                                continue
-                            try:
-                                parsed = json.loads(raw)
-                                choices = parsed.get("choices") or []
-                                if choices:
-                                    content = choices[0].get("message", {}).get("content", "")
-                                    if content and str(content).strip():
-                                        return str(content).strip()
-                            except Exception:
-                                if len(raw) > 2:
-                                    return raw
-                    except Exception:
-                        continue
-            return None
-
-        ai_answer: Optional[str] = None
-        if model_choice == "gemini":
-            ai_answer = _try_google_gemini()
-            if not ai_answer:
-                ai_answer = _try_openai_compatible("gemini")
-        else:
-            ai_answer = _try_openai_compatible(m_meta["pollinations"])
-            if not ai_answer:
-                ai_answer = _try_google_gemini()
-
-        if not ai_answer:
-            return (
-                "⚠️ Hozir AI serverlaridan javob olib bo‘lmadi (internet yoki API kalit cheklovi).\n"
-                "Iltimos, bir necha soniyadan so‘ng qayta yozing yoki **⚙️ Model** tugmasi orqali boshqa modelni (ChatGPT / DeepSeek / Gemini) tanlab ko‘ring.",
-                m_meta["label"],
-            )
-
-        # Suhbat xotirasini saqlaymiz (oxirgi 20 ta xabar = 10 ta juftlik)
-        history.append({"role": "user", "content": (user_question or "[Rasm yuborildi]")[:1000]})
-        history.append({"role": "assistant", "content": ai_answer[:1500]})
-        put_file(f"user/{user_uid}.ai_hist.json", json.dumps(history[-20:], ensure_ascii=False))
-        return ai_answer, m_meta["label"]
-
-    def _ai_arab_compact_kb(user_uid: str) -> str:
-        """Har bir AI javobi tagida faqat 1 qatorli ixcham ChatGPT/Gemini uslubidagi tugmalar."""
-        m_key = _get_user_ai_model(user_uid)
-        m_lbl = AI_MODELS_CATALOG.get(m_key, AI_MODELS_CATALOG["gemini"])["label"]
-        return keyboard([
-            [
-                {"text": "🔄 Yangi chat", "callback_data": "ai_arab=clear"},
-                {"text": f"⚙️ {m_lbl}", "callback_data": "ai_arab=models"},
-                {"text": "💎 Tarif", "callback_data": "ai_arab=tariffs"},
-            ]
-        ])
-
-    def _ai_arab_main_view(user_uid: str) -> Tuple[str, str]:
-        u_str = str(user_uid).strip()
-        is_owner = (u_str == str(ADMIN))
-        sub = _get_user_ai_sub(u_str)
-        plan_key = str(sub.get("plan") or "BEPUL").upper()
-        cfg = _get_ai_tariffs_config()
-        p_info = cfg.get(plan_key, cfg["BEPUL"])
-        m_key = _get_user_ai_model(u_str)
-        m_full = AI_MODELS_CATALOG.get(m_key, AI_MODELS_CATALOG["gemini"])["full"]
-
-        if is_owner:
-            status_block = "👑 <b>Maqom:</b> Bosh Admin (<code>♾ Cheksiz</code>)"
-        else:
-            d_used, d_lim = int(sub.get("daily_used") or 0), int(p_info["daily_limit"])
-            w_used, w_lim = int(sub.get("weekly_used") or 0), int(p_info["weekly_limit"])
-            i_used, i_lim = int(sub.get("images_used") or 0), int(p_info["image_limit"])
-            exp_s = sub.get("expires_str") or "Doimiy (Bepul)"
-            status_block = (
-                f"🏷 <b>Tarif:</b> {p_info['name']} (<code>{exp_s}</code>)\n"
-                f"💬 Kunlik: <code>{d_used}/{d_lim}</code> · Haftalik: <code>{w_used}/{w_lim}</code> · 🎨 Rasm: <code>{i_used}/{i_lim}</code>"
-            )
-
-        txt = (
-            f"🤖 <b>AI Arab</b> — {m_full}\n\n"
-            f"{status_block}\n\n"
-            "Xuddi <b>ChatGPT, DeepSeek va Gemini</b> kabi bemalol suhbatlashing: istalgan savol yozing, kod so‘rang, "
-            "rasm tashlang (tahlil qilib beraman) yoki <i>«... rasmini chiz»</i> deb rasm yarating!"
-        )
-        kb = keyboard([
-            [
-                {"text": "⚙️ Model (Gemini / GPT / DeepSeek)", "callback_data": "ai_arab=models"},
-            ],
-            [
-                {"text": "🎨 Rasm yaratish", "callback_data": "ai_arab=draw_prompt"},
-                {"text": "💎 AI Tariflar", "callback_data": "ai_arab=tariffs"},
-            ],
-            [
-                {"text": "🔄 Yangi chat", "callback_data": "ai_arab=clear"},
-                {"text": "📊 Limitim", "callback_data": "ai_arab=my_limits"},
-            ],
-        ])
-        return txt, kb
-
-    def _execute_ai_arab_image_flow(target_cid: str, raw_prompt_text: str) -> None:
-        ok_q, q_msg = _check_and_consume_ai_quota(target_cid, is_image=True)
-        if not ok_q:
-            sms(target_cid, q_msg, keyboard([[{"text": "💎 AI Tariflar", "callback_data": "ai_arab=tariffs"}]]))
-            return
-        prompt_str = raw_prompt_text.strip()
-        send_chat_action_bg(target_cid, "upload_photo")
-        wait_res = sms(target_cid, "🎨 <i>Rasm yaratilmoqda...</i>")
-        wait_mid = (wait_res.get("result") or {}).get("message_id") if isinstance(wait_res.get("result"), dict) else None
-
-        img_bytes, img_fname = _generate_ai_image_bytes(prompt_str)
-        res_ph = send_photo_bytes(
-            target_cid,
-            img_bytes,
-            filename=img_fname,
-            caption=f"🎨 <i>{prompt_str}</i>\n\n<code>{q_msg}</code>",
-            reply_markup=_ai_arab_compact_kb(target_cid),
-        )
-        if wait_mid:
-            del_msg(target_cid, wait_mid)
-        if not res_ph.get("ok"):
-            sms(target_cid, f"⚠️ Rasm yuborishda xatolik: {res_ph.get('description', 'Xato')}", _ai_arab_compact_kb(target_cid))
-
-    if text == "🤖 AI Arab" and config.ENABLE_AI_ARAB and joinchat(cid):
-        put_file(f"user/{cid}.step", "ai_arab_chat")
-        v_txt, v_kb = _ai_arab_main_view(cid)
-        sms(cid, "💬 <b>AI Arab</b> chat faollashdi (Chiqish: «➡️ Orqaga»)", ORT_KB)
-        sms(cid, v_txt, v_kb)
-        return
-
-    if data.startswith("ai_arab=") and config.ENABLE_AI_ARAB and joinchat(chat_id):
-        act = data.split("=", 1)[1]
-        if act in ("home", "my_limits"):
-            put_file(f"user/{chat_id}.step", "ai_arab_chat")
-            v_txt, v_kb = _ai_arab_main_view(chat_id)
-            edit(chat_id, message_id, v_txt, v_kb)
-            return
-        elif act == "models":
-            cur_m = _get_user_ai_model(chat_id)
-            lines = ["⚙️ <b>AI Modelni tanlang:</b>\n"]
-            kb_rows = []
-            for mk, mv in AI_MODELS_CATALOG.items():
-                mark = "✅ " if mk == cur_m else ""
-                lines.append(f"{mark}<b>{mv['full']}</b>\n<i>{mv['desc']}</i>\n")
-                kb_rows.append([{"text": f"{mark}{mv['full']}", "callback_data": f"ai_set_model={mk}"}])
-            kb_rows.append([{"text": "⬅️ Orqaga", "callback_data": "ai_arab=home"}])
-            edit(chat_id, message_id, "\n".join(lines), keyboard(kb_rows))
-            return
-        elif act == "clear":
-            unlink_file(f"user/{chat_id}.ai_hist.json")
-            put_file(f"user/{chat_id}.step", "ai_arab_chat")
-            bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "🔄 Yangi suhbat boshlandi! Xotira tozalandi.", "show_alert": False})
-            sms(chat_id, "🔄 <b>Yangi suhbat boshlandi.</b> Marhamat, savolingizni yozing:")
-            return
-        elif act == "draw_prompt":
-            put_file(f"user/{chat_id}.step", "ai_arab_draw")
-            edit(
-                chat_id,
-                message_id,
-                "🎨 <b>Rasm Yaratish Rejimi</b>\n\n"
-                "Qanday rasm chizib berishimni xohlaysiz? Tasvirlab yozing:\n"
-                "<i>Masalan: Kelajakdagi Toshkent shahri, tungi chiroqlar, 4K</i>",
-                keyboard([[{"text": "⬅️ Suhbatga qaytish", "callback_data": "ai_arab=home"}]]),
-            )
-            return
-        elif act == "tariffs":
-            cfg = _get_ai_tariffs_config()
-            u_row = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (chat_id,)) or {}
-            u_bal = fmt_money(u_row.get("balance", "0"))
-            go_i, pro_i, plus_i, bep_i = cfg["GO"], cfg["PRO"], cfg["PLUS"], cfg["BEPUL"]
-            t_txt = (
-                "💎 <b>AI Arab Tariflari va Limitlari</b>\n\n"
-                f"🆓 <b>BEPUL (0 so‘m):</b> {bep_i['daily_limit']} kun / {bep_i['weekly_limit']} hafta · 🎨 {bep_i['image_limit']} rasm\n"
-                f"🟢 <b>GO ({fmt_money(go_i['base_monthly'])} so‘m/oy):</b> {go_i['daily_limit']} kun / {go_i['weekly_limit']} hafta · 🎨 {go_i['image_limit']} rasm\n"
-                f"🔵 <b>PRO ({fmt_money(pro_i['base_monthly'])} so‘m/oy):</b> {pro_i['daily_limit']} kun / {pro_i['weekly_limit']} hafta · 🎨 {pro_i['image_limit']} rasm\n"
-                f"🟣 <b>PLUS ({fmt_money(plus_i['base_monthly'])} so‘m/oy):</b> {plus_i['daily_limit']} kun / {plus_i['weekly_limit']} hafta · 🎨 <b>{plus_i['image_limit']} rasm</b>\n\n"
-                f"⏳ <i>Muddatlar: 1 kun, 1 hafta, 1 oy, 3 oy, 6 oy, 1 yil</i>\n"
-                f"💵 <b>Balansingiz:</b> <b>{u_bal} so‘m</b>"
-            )
-            edit(
-                chat_id,
-                message_id,
-                t_txt,
-                keyboard([
-                    [{"text": "🟢 GO Tarifini tanlash", "callback_data": "ai_plan_sel=GO"}],
-                    [{"text": "🔵 PRO Tarifini tanlash", "callback_data": "ai_plan_sel=PRO"}],
-                    [{"text": "🟣 PLUS Tarifini tanlash (50 ta rasm)", "callback_data": "ai_plan_sel=PLUS"}],
-                    [{"text": "⬅️ Orqaga", "callback_data": "ai_arab=home"}],
-                ]),
-            )
-            return
-
-    if data.startswith("ai_set_model=") and config.ENABLE_AI_ARAB and joinchat(chat_id):
-        m_sel = data.split("=", 1)[1].strip().lower()
-        if m_sel in AI_MODELS_CATALOG:
-            put_file(f"user/{chat_id}.ai_model", m_sel)
-            put_file(f"user/{chat_id}.step", "ai_arab_chat")
-            bot("answerCallbackQuery", {"callback_query_id": cqid, "text": f"✅ {AI_MODELS_CATALOG[m_sel]['full']} tanlandi!"})
-            v_txt, v_kb = _ai_arab_main_view(chat_id)
-            edit(chat_id, message_id, v_txt, v_kb)
-        return
-
-    if data.startswith("ai_plan_sel=") and config.ENABLE_AI_ARAB and joinchat(chat_id):
-        plan_key = data.split("=", 1)[1].strip().upper()
-        cfg = _get_ai_tariffs_config()
-        if plan_key not in cfg:
-            return
-        p_info = cfg[plan_key]
-        u_row = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (chat_id,)) or {}
-        u_bal = fmt_money(u_row.get("balance", "0"))
-        kb_rows = []
-        lines = [
-            f"💎 <b>{p_info['name']} Tarifi — Muddatni tanlang:</b>\n",
-            f"• 💬 Kunlik: <b>{p_info['daily_limit']} ta</b> | 📅 Haftalik: <b>{p_info['weekly_limit']} ta</b> | 🎨 Rasm: <b>{p_info['image_limit']} ta</b>",
-            f"💵 <b>Balansingiz:</b> <b>{u_bal} so‘m</b>\n",
-        ]
-        for d_key in ("1d", "1w", "1m", "3m", "6m", "1y"):
-            d_obj = AI_DURATION_OPTIONS[d_key]
-            price_val = _calc_ai_plan_price(plan_key, d_key)
-            kb_rows.append([{"text": f"⏳ {d_obj['label']} — {fmt_money(price_val)} so‘m", "callback_data": f"ai_plan_buy={plan_key}={d_key}"}])
-        kb_rows.append([{"text": "💳 Hisobni to‘ldirish", "callback_data": "menu=tolov"}])
-        kb_rows.append([{"text": "⬅️ Orqaga", "callback_data": "ai_arab=tariffs"}])
-        edit(chat_id, message_id, "\n".join(lines), keyboard(kb_rows))
-        return
-
-    if data.startswith("ai_plan_buy=") and config.ENABLE_AI_ARAB and joinchat(chat_id):
-        parts = data.split("=")
-        plan_key, dur_key = parts[1].upper(), parts[2]
-        cfg = _get_ai_tariffs_config()
-        if plan_key not in cfg or dur_key not in AI_DURATION_OPTIONS:
-            return
-        price_val = _calc_ai_plan_price(plan_key, dur_key)
-        d_obj = AI_DURATION_OPTIONS[dur_key]
-        p_info = cfg[plan_key]
-
-        u_row = database.fetch_one("SELECT * FROM `users` WHERE `id` = ?", (chat_id,)) or {}
-        u_bal = float(u_row.get("balance") or 0)
-        if u_bal < price_val:
-            bot(
-                "answerCallbackQuery",
-                {
-                    "callback_query_id": cqid,
-                    "text": f"⛔️ Mablag‘ yetarli emas!\nKerak: {fmt_money(price_val)} so‘m\nBalans: {fmt_money(u_bal)} so‘m",
-                    "show_alert": True,
-                },
-            )
-            return
-
-        new_bal = round(u_bal - price_val, 2)
-        database.execute("UPDATE `users` SET `balance` = ? WHERE `id` = ?", (fmt_money(new_bal), chat_id))
-        sub = _get_user_ai_sub(chat_id)
-        base_ts = max(time.time(), float(sub.get("expires_ts") or 0)) if sub.get("plan") == plan_key else time.time()
-        new_exp_ts = base_ts + (int(d_obj["days"]) * 86400)
-        new_exp_str = datetime.datetime.fromtimestamp(new_exp_ts).strftime("%Y.%m.%d %H:%M")
-
-        database.execute(
-            """UPDATE `ai_subscriptions`
-            SET `plan` = ?, `expires_ts` = ?, `expires_str` = ?, `daily_used` = 0, `weekly_used` = 0, `images_used` = 0
-            WHERE `user_id` = ?""",
-            (plan_key, new_exp_ts, new_exp_str, str(chat_id)),
-        )
-        bot("answerCallbackQuery", {"callback_query_id": cqid, "text": f"🎉 {p_info['name']} ({d_obj['label']}) ulandi!", "show_alert": True})
-        v_txt, v_kb = _ai_arab_main_view(chat_id)
-        edit(chat_id, message_id, f"✅ <b>{p_info['name']} ({d_obj['label']}) faollashtirildi!</b>\n⏳ <code>{new_exp_str}</code> gacha\n\n" + v_txt, v_kb)
-        return
-
-    # JONLI CHATGPT / DEEPSEEK / GEMINI SUHBAT + RASM TAHLILI (VISION) + RASM YARATISH
-    if step in ("ai_arab_draw", "ai_arab_chat") and (text or photo) and config.ENABLE_AI_ARAB and joinchat(cid):
-        user_txt = (text or caption or "").strip()
-
-        # 1. Agar rasm yaratish rejimida matn yuborilgan bo'lsa yoki matnda rasm chizish so'ralgan bo'lsa
-        if text and (step == "ai_arab_draw" or _looks_like_image_prompt(user_txt)):
-            _execute_ai_arab_image_flow(cid, user_txt)
-            put_file(f"user/{cid}.step", "ai_arab_chat")
-            return
-
-        # 2. Oddiy jonli AI suhbat yoki rasm tahlili (Vision)
-        ok_q, q_msg = _check_and_consume_ai_quota(cid, is_image=False)
-        if not ok_q:
-            sms(cid, q_msg, keyboard([[{"text": "💎 AI Tariflar", "callback_data": "ai_arab=tariffs"}]]))
-            return
-
-        send_chat_action_bg(cid, "typing")
-        thinking_res = sms(cid, "💭 <i>O‘ylamoqda...</i>")
-        thinking_mid = (thinking_res.get("result") or {}).get("message_id") if isinstance(thinking_res.get("result"), dict) else None
-
-        img_b64: Optional[str] = None
-        if photo and isinstance(photo, list):
-            try:
-                best_ph = photo[-1]
-                f_bytes = download_telegram_file_bytes(str(best_ph.get("file_id", "")))
-                if f_bytes:
-                    img_b64 = base64.b64encode(f_bytes).decode("ascii")
-            except Exception:
-                img_b64 = None
-
-        raw_ans, m_label = _call_real_llm_chat(cid, user_txt, image_b64=img_b64)
-        html_ans = _md_to_tg_html(raw_ans)
-        if len(html_ans) > 3850:
-            html_ans = html_ans[:3850] + "..."
-
-        final_msg = f"{html_ans}\n\n<i>{m_label} · {q_msg}</i>"
-        compact_kb = _ai_arab_compact_kb(cid)
-
-        if thinking_mid:
-            ed_res = edit(cid, thinking_mid, final_msg, compact_kb)
-            if not ed_res.get("ok"):
-                # HTML parse xatosi bo'lsa oddiy matn ko'rinishida yuboramiz
-                plain_safe = raw_ans[:3850].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                edit(cid, thinking_mid, f"{plain_safe}\n\n<i>{m_label} · {q_msg}</i>", compact_kb)
-        else:
-            sms(cid, final_msg, compact_kb)
-        return
-
-
-    # ========================================================================
-    # BOSH ADMIN UCHUN MAXSUS BO'LIM: 🤖 AI ARAB SOZLAMALARI
-    # (Faqat Bosh Admin cid == ADMIN ko'ra oladi va boshqaradi!)
-    # ========================================================================
-
-    def _build_bosh_admin_ai_panel() -> Tuple[str, str]:
-        gem_k = _get_active_gemini_key()
-        masked_k = (gem_k[:10] + "..." + gem_k[-6:]) if len(gem_k) > 18 else gem_k
-        cfg = _get_ai_tariffs_config()
-        all_subs = database.fetch_all("SELECT * FROM `ai_subscriptions`")
-        paid_cnt = sum(1 for r in all_subs if r.get("plan") in ("GO", "PRO", "PLUS"))
-        tot_reqs = sum(int(r.get("total_requests") or 0) for r in all_subs)
-
-        bep, go, pro, plus = cfg["BEPUL"], cfg["GO"], cfg["PRO"], cfg["PLUS"]
-        txt = (
-            "🤖 <b>AI Arab (Gemini AI) — Bosh Admin Sozlamalari</b>\n"
-            "<i>(Ushbu bo‘lim faqat Bosh Admin uchun ko‘rinadi!)</i>\n\n"
-            f"🔑 <b>Gemini API Key:</b> <code>{masked_k}</code>\n"
-            f"👥 <b>Pullik AI obunachilar:</b> <b>{paid_cnt} ta</b> | 📊 <b>Jami so‘rovlar:</b> <b>{tot_reqs} ta</b>\n\n"
-            f"📋 <b>Joriy Tariflar va Limitlar (Kunlik / Haftalik / Rasm):</b>\n"
-            f"• 🆓 <b>BEPUL:</b> {bep['daily_limit']} kun / {bep['weekly_limit']} hafta / {bep['image_limit']} rasm (0 so‘m)\n"
-            f"• 🟢 <b>GO:</b> {go['daily_limit']} kun / {go['weekly_limit']} hafta / {go['image_limit']} rasm (1 oy: {fmt_money(go['base_monthly'])} so‘m)\n"
-            f"• 🔵 <b>PRO:</b> {pro['daily_limit']} kun / {pro['weekly_limit']} hafta / {pro['image_limit']} rasm (1 oy: {fmt_money(pro['base_monthly'])} so‘m)\n"
-            f"• 🟣 <b>PLUS:</b> {plus['daily_limit']} kun / {plus['weekly_limit']} hafta / {plus['image_limit']} rasm (1 oy: {fmt_money(plus['base_monthly'])} so‘m)\n\n"
-            "👇 <i>O‘zgartirmoqchi bo‘lgan sozlamani tanlang:</i>"
-        )
-        kb = keyboard([
-            [{"text": "🔑 Gemini API Keyni o‘zgartirish", "callback_data": "adm_ai=set_key"}],
-            [
-                {"text": "💰 GO narxi", "callback_data": "adm_ai=price_GO"},
-                {"text": "💰 PRO narxi", "callback_data": "adm_ai=price_PRO"},
-                {"text": "💰 PLUS narxi", "callback_data": "adm_ai=price_PLUS"},
-            ],
-            [
-                {"text": "📊 BEPUL limitlari", "callback_data": "adm_ai=lim_BEPUL"},
-                {"text": "📊 GO limitlari", "callback_data": "adm_ai=lim_GO"},
-            ],
-            [
-                {"text": "📊 PRO limitlari", "callback_data": "adm_ai=lim_PRO"},
-                {"text": "📊 PLUS limitlari (50 rasm)", "callback_data": "adm_ai=lim_PLUS"},
-            ],
-            [{"text": "🎁 Foydalanuvchiga AI Tarif berish / Limitni 0 qilish", "callback_data": "adm_ai=grant_user"}],
-        ])
-        return txt, kb
-
-    if text == "🤖 AI Arab sozlamalari":
-        if str(cid) != str(ADMIN):
-            sms(cid, "⛔️ <b>Ruxsat yo‘q!</b>\n«🤖 AI Arab sozlamalari» bo‘limini faqat <b>Bosh Admin (Ega)</b> ko‘ra oladi va boshqaradi!", get_dynamic_panel_kb(cid))
-            return
-        p_txt, p_kb = _build_bosh_admin_ai_panel()
-        sms(cid, p_txt, p_kb)
-        return
-
-    if data.startswith("adm_ai="):
-        if str(chat_id) != str(ADMIN):
-            bot("answerCallbackQuery", {"callback_query_id": cqid, "text": "⛔️ Bu bo‘lim faqat Bosh Admin uchun ochiq!", "show_alert": True})
-            return
-        act = data.split("=", 1)[1]
-        if act == "home":
-            p_txt, p_kb = _build_bosh_admin_ai_panel()
-            edit(chat_id, message_id, p_txt, p_kb)
-        elif act == "set_key":
-            del_msg(chat_id, message_id)
-            sms(
-                chat_id,
-                f"🔑 <b>Yangi Google Gemini API Keyni yuboring:</b>\n\nJoriy kalit: <code>{_get_active_gemini_key()}</code>",
-                AORT_KB,
-            )
-            put_file(f"user/{chat_id}.step", "adm_ai_set_key")
-        elif act.startswith("price_"):
-            p_name = act.split("_", 1)[1].upper()
-            put_file("set/tmp_ai_plan.txt", p_name)
-            del_msg(chat_id, message_id)
-            sms(
-                chat_id,
-                f"💰 <b>AI Arab «{p_name}» tarifining 1 oylik (bazaviy) narxini kiriting (so‘mda):</b>\n\n"
-                "<i>(1 kun, 1 hafta, 3 oy, 6 oy va 1 yillik narxlar shu narxdan avtomatik hisoblanadi)</i>",
-                AORT_KB,
-            )
-            put_file(f"user/{chat_id}.step", "adm_ai_set_price")
-        elif act.startswith("lim_"):
-            p_name = act.split("_", 1)[1].upper()
-            put_file("set/tmp_ai_plan.txt", p_name)
-            del_msg(chat_id, message_id)
-            sms(
-                chat_id,
-                f"📊 <b>AI Arab «{p_name}» tarifi uchun yangi limitlarni bo‘sh joy bilan 3 ta raqamda yuboring:</b>\n\n"
-                "<code>KUNLIK HAFTALIK RASM</code>\n\n"
-                "<i>Masalan (PLUS tarifi uchun: kuniga 90 ta, haftasiga 400 ta, 50 ta rasm):</i>\n"
-                "<code>90 400 50</code>",
-                AORT_KB,
-            )
-            put_file(f"user/{chat_id}.step", "adm_ai_set_limits")
-        elif act == "grant_user":
-            del_msg(chat_id, message_id)
-            sms(
-                chat_id,
-                "🎁 <b>Foydalanuvchiga AI Tarif berish va limitini yangilash:</b>\n\n"
-                "Quyidagi formatda yuboring:\n"
-                "<code>TELEGRAM_ID TARIF KUNLAR</code>\n\n"
-                "<i>Masalan (PLUS tarifini 30 kunga berish):</i>\n"
-                "<code>123456789 PLUS 30</code>",
-                AORT_KB,
-            )
-            put_file(f"user/{chat_id}.step", "adm_ai_grant_user")
-        return
-
-    if step == "adm_ai_set_key" and str(cid) == str(ADMIN) and text:
-        put_file("set/gemini_api_key.txt", text.strip())
-        unlink_file(f"user/{cid}.step")
-        sms(cid, "✅ <b>Gemini API Key muvaffaqiyatli yangilandi!</b>", PANEL_KB)
-        return
-
-    if step == "adm_ai_set_price" and str(cid) == str(ADMIN) and text:
-        clean_v = text.strip().replace(" ", "")
-        p_name = get_file("set/tmp_ai_plan.txt").strip().lower()
-        if clean_v.replace(".", "", 1).isdigit() and p_name in ("go", "pro", "plus"):
-            put_file(f"set/ai_price_{p_name}_m.txt", clean_v)
-            unlink_file(f"user/{cid}.step")
-            sms(cid, f"✅ <b>AI Arab {p_name.upper()} tarifining oylik narxi {fmt_money(clean_v)} so‘m etib saqlandi!</b>", PANEL_KB)
-        else:
-            sms(cid, "⚠️ Faqat raqam kiriting (masalan: 50000):", AORT_KB)
-        return
-
-    if step == "adm_ai_set_limits" and str(cid) == str(ADMIN) and text:
-        parts = text.strip().split()
-        p_name = get_file("set/tmp_ai_plan.txt").strip().lower()
-        if len(parts) >= 3 and all(x.isdigit() for x in parts[:3]) and p_name in ("bepul", "go", "pro", "plus"):
-            put_file(f"set/ai_lim_{p_name}_d.txt", parts[0])
-            put_file(f"set/ai_lim_{p_name}_w.txt", parts[1])
-            put_file(f"set/ai_lim_{p_name}_i.txt", parts[2])
-            unlink_file(f"user/{cid}.step")
-            sms(
-                cid,
-                f"✅ <b>AI Arab {p_name.upper()} limitlari yangilandi!</b>\n"
-                f"• Kunlik: <b>{parts[0]} ta</b>\n"
-                f"• Haftalik: <b>{parts[1]} ta</b>\n"
-                f"• Rasm: <b>{parts[2]} ta</b>",
-                PANEL_KB,
-            )
-        else:
-            sms(cid, "⚠️ 3 ta raqamni bo‘sh joy bilan yuboring (masalan: <code>90 400 50</code>):", AORT_KB)
-        return
-
-    if step == "adm_ai_grant_user" and str(cid) == str(ADMIN) and text:
-        parts = text.strip().split()
-        if len(parts) >= 3 and parts[0].isdigit() and parts[1].upper() in ("BEPUL", "GO", "PRO", "PLUS") and parts[2].isdigit():
-            t_uid, t_plan, t_days = parts[0], parts[1].upper(), int(parts[2])
-            _get_user_ai_sub(t_uid)
-            exp_ts = time.time() + (t_days * 86400)
-            exp_str = datetime.datetime.fromtimestamp(exp_ts).strftime("%Y.%m.%d %H:%M")
-            database.execute(
-                """UPDATE `ai_subscriptions`
-                SET `plan` = ?, `expires_ts` = ?, `expires_str` = ?, `daily_used` = 0, `weekly_used` = 0, `images_used` = 0
-                WHERE `user_id` = ?""",
-                (t_plan, exp_ts, exp_str, t_uid),
-            )
-            unlink_file(f"user/{cid}.step")
-            sms(t_uid, f"🎁 <b>Bosh Admin tomonidan sizga AI Arab «{t_plan}» tarifi ({t_days} kunga) taqdim etildi!</b>")
-            sms(cid, f"✅ Foydalanuvchi (<code>{t_uid}</code>) uchun <b>{t_plan}</b> tarifi ({t_days} kun) yoqildi!", PANEL_KB)
-        else:
-            sms(cid, "⚠️ Format xato! Namuna: <code>123456789 PLUS 30</code>", AORT_KB)
-        return
-
 
     # ========================================================================
     # FOYDALANUVCHI: Buyurtma berish oqimi
