@@ -83,8 +83,8 @@ ADMIN_IDS: List[int] = [
 ]
 
 # Telegram profil ulash (SMS / QR) uchun my.telegram.org dan olingan API_ID va API_HASH:
-API_ID: int = int(os.getenv("API_ID", "0").strip() or "0")
-API_HASH: str = os.getenv("API_HASH", "YOUR_API_HASH_HERE").strip()
+API_ID: int = int(os.getenv("39161685", "0").strip() or "0")
+API_HASH: str = os.getenv("API_HASH", "996579d0c347cc76b32d9c5e0a92035f").strip()
 
 TIMEZONE_OFFSET: int = int(os.getenv("TIMEZONE_OFFSET", "5"))
 TZ = timezone(timedelta(hours=TIMEZONE_OFFSET))
