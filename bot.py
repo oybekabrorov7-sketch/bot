@@ -1,3 +1,22 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+AutoXabar Bot — @AutoXabarBot shabloni asosida 100% BEPUL E'lon Tarqatuvchi Bot
+===============================================================================
+- Bot qismi: 100% standart Python kutubxonalari (aiogram/requests kerak emas!)
+- Profil ulash (SMS kod / QR kod / 2FA) va guruhlarga avto-e'lon tarqatish:
+  Telethon orqali (agar o'rnatilmagan bo'lsa, skript o'zi avtomatik o'rnatadi).
+
+Asosiy imkoniyatlar (100% BEPUL, Pro/limit cheklovlarisiz):
+  - Admin tasdiqlash va bloklash tizimi (/start -> adminga Ha/Bloklash so'rovi)
+  - Bloklanganda foydalanuvchiga avtomatik xabar yuborish va kirishni yopish
+  - 👥 Profillar: cheksiz profil ulash (📱 SMS kod + Share contact + nuqtali kod 54.568 + ❗ Kod kelmadi + 🔐 2FA eslatma + 📷 QR kod)
+  - 📋 Guruhlar: profil guruhlarini avtomatik yuklash, sahifalab tanlash, aqlli filter
+  - 💬 Xabar: matn, rasm, video e'lonlar + Spintax ({Salom|Assalomu alaykum})
+  - ⏱ Interval: moslashuvchan interval, anti-ban kechikish, ish soatlari
+  - ▶️ Ishga tushirish / ⏹ To'xtatish, 📊 Statistika va 👑 Admin panel (/admin)
+"""
+
 import asyncio
 import html
 import json
@@ -83,7 +102,7 @@ ADMIN_IDS: List[int] = [
 ]
 
 # Telegram profil ulash (SMS / QR) uchun my.telegram.org dan olingan API_ID va API_HASH:
-API_ID: int = int(os.getenv("39161685", "0").strip() or "0")
+API_ID: int = int(os.getenv("API_ID", "39161685").strip() or "0")
 API_HASH: str = os.getenv("API_HASH", "996579d0c347cc76b32d9c5e0a92035f").strip()
 
 TIMEZONE_OFFSET: int = int(os.getenv("TIMEZONE_OFFSET", "5"))
